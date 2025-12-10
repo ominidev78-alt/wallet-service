@@ -1,0 +1,18 @@
+import { Router } from 'express'
+import { adminWalletController } from '../controllers/AdminWalletController.js'
+
+const router = Router()
+
+router.get('/admin/wallet/:id', (req, res, next) =>
+  adminWalletController.getUserWallet(req, res, next)
+)
+
+router.get('/admin/wallet/:id/ledger', (req, res, next) =>
+  adminWalletController.getUserLedger(req, res, next)
+)
+
+router.patch('/admin/wallet/:id/balance', (req, res, next) =>
+  adminWalletController.adjustBalance(req, res, next)
+)
+
+export default router
