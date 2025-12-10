@@ -33,21 +33,23 @@ class InternalPaymentsController {
       timestamp: new Date().toISOString()
     })
 
+    // Prioridade 1: Buscar usuário com is_treasury = TRUE
     let houseUserId = null
     try {
       const treasuryUser = await UserModel.findTreasuryUser()
       if (treasuryUser && treasuryUser.id) {
         houseUserId = Number(treasuryUser.id)
-        console.log('[InternalPaymentsController.creditHouseWallet]  Usuário de tesouraria encontrado via findTreasuryUser:', {
+        console.log('[InternalPaymentsController.creditHouseWallet] ✅ Usuário de tesouraria encontrado via findTreasuryUser:', {
           userId: houseUserId,
           name: treasuryUser.name
         })
       }
     } catch (err) {
-      console.log('[InternalPaymentsController.creditHouseWallet]  Erro ao buscar via findTreasuryUser:', err.message)
+      // Se o campo is_treasury não existir, continua para usar HOUSE_USER_ID
+      console.log('[InternalPaymentsController.creditHouseWallet] ⚠️ Erro ao buscar via findTreasuryUser:', err.message)
     }
 
- 
+    // Prioridade 2: Usar HOUSE_USER_ID do .env
     if (!houseUserId || !Number.isFinite(houseUserId) || houseUserId <= 0) {
       const houseUserIdRaw = env.HOUSE_USER_ID
       console.log('[InternalPaymentsController.creditHouseWallet] Tentando usar env.HOUSE_USER_ID:', {
@@ -59,20 +61,20 @@ class InternalPaymentsController {
         const parsed = parseInt(String(houseUserIdRaw).trim(), 10)
         if (Number.isFinite(parsed) && parsed > 0) {
           houseUserId = parsed
-          console.log('[InternalPaymentsController.creditHouseWallet]  Usuário de tesouraria obtido via env.HOUSE_USER_ID:', houseUserId)
+          console.log('[InternalPaymentsController.creditHouseWallet] ✅ Usuário de tesouraria obtido via env.HOUSE_USER_ID:', houseUserId)
         } else {
-          console.error('[InternalPaymentsController.creditHouseWallet]  env.HOUSE_USER_ID inválido após parse:', {
+          console.error('[InternalPaymentsController.creditHouseWallet] ⚠️ env.HOUSE_USER_ID inválido após parse:', {
             raw: houseUserIdRaw,
             parsed
           })
         }
       } else {
-        console.log('[InternalPaymentsController.creditHouseWallet]  env.HOUSE_USER_ID não configurado')
+        console.log('[InternalPaymentsController.creditHouseWallet] ⚠️ env.HOUSE_USER_ID não configurado')
       }
     }
 
     if (!houseUserId || !Number.isFinite(houseUserId) || houseUserId <= 0) {
-      console.error('[InternalPaymentsController.creditHouseWallet]  Nenhum usuário de tesouraria configurado', {
+      console.error('[InternalPaymentsController.creditHouseWallet] ❌ Nenhum usuário de tesouraria configurado', {
         houseUserId,
         isFinite: Number.isFinite(houseUserId),
         isPositive: houseUserId > 0,
@@ -82,13 +84,14 @@ class InternalPaymentsController {
     }
 
     if (!houseAmount || houseAmount <= 0) {
-      console.log('[InternalPaymentsController.creditHouseWallet]  houseAmount inválido ou zero:', houseAmount)
+      console.log('[InternalPaymentsController.creditHouseWallet] ⚠️ houseAmount inválido ou zero:', houseAmount)
       return
     }
 
+    // Verificar se o usuário existe
     const houseUser = await UserModel.findById(houseUserId)
     if (!houseUser) {
-      console.error('[InternalPaymentsController.creditHouseWallet]  Usuário de tesouraria não encontrado no banco:', houseUserId)
+      console.error('[InternalPaymentsController.creditHouseWallet] ❌ Usuário de tesouraria não encontrado no banco:', houseUserId)
       return
     }
 
@@ -98,6 +101,7 @@ class InternalPaymentsController {
       email: houseUser.email
     })
 
+    // Usar getOrCreateHouseWallet para garantir que a wallet seja do tipo HOUSE
     console.log('[InternalPaymentsController.creditHouseWallet] Obtendo ou criando wallet da tesouraria...', {
       houseUserId,
       currency
@@ -105,9 +109,9 @@ class InternalPaymentsController {
     
     const houseWallet = await WalletModel.getOrCreateHouseWallet(houseUserId, currency)
 
-
+    // Verificar se a wallet tem type = 'HOUSE'
     if (houseWallet && houseWallet.type !== 'HOUSE') {
-      console.error('[InternalPaymentsController.creditHouseWallet]  Wallet encontrada não é do tipo HOUSE!', {
+      console.error('[InternalPaymentsController.creditHouseWallet] ❌ Wallet encontrada não é do tipo HOUSE!', {
         walletId: houseWallet.id,
         walletType: houseWallet.type,
         expectedType: 'HOUSE'
@@ -116,7 +120,7 @@ class InternalPaymentsController {
     }
 
     if (!houseWallet) {
-      console.error('[InternalPaymentsController.creditHouseWallet]  Wallet da tesouraria não encontrada!')
+      console.error('[InternalPaymentsController.creditHouseWallet] ❌ Wallet da tesouraria não encontrada!')
       return
     }
 
@@ -128,7 +132,7 @@ class InternalPaymentsController {
       type
     })
 
-   
+    // Para taxas da tesouraria, usar o external_id principal com sufixo ou gerar baseado no merOrderNo
     const houseExternalId = externalId 
       ? `${externalId}-fee-${type.toLowerCase()}`
       : (merOrderNo 
@@ -152,7 +156,7 @@ class InternalPaymentsController {
       externalId: houseExternalId
     })
 
-    console.log('[InternalPaymentsController.creditHouseWallet]  Taxa creditada na tesouraria com sucesso:', {
+    console.log('[InternalPaymentsController.creditHouseWallet] ✅ Taxa creditada na tesouraria com sucesso:', {
       walletId: houseWallet.id,
       amount: houseAmount,
       userId,
@@ -163,16 +167,17 @@ class InternalPaymentsController {
   async applySplit(req, res, next) {
     try {
       console.log('[InternalPaymentsController.applySplit] ========================================');
-      console.log('[InternalPaymentsController.applySplit] INICIANDO PROCESSAMENTO DE CRÉDITO');
+      console.log('[InternalPaymentsController.applySplit] 🚀 INICIANDO PROCESSAMENTO DE CRÉDITO');
       console.log('[InternalPaymentsController.applySplit] ========================================');
       console.log('[InternalPaymentsController.applySplit] Payload recebido:', req.body);
       
-
+      // Gerar external_id se não foi fornecido (compatibilidade com gateway)
       if (!req.body.external_id && !req.body.externalId) {
         const merOrderNo = req.body.merOrderNo || `user-${req.body.userId || 'unknown'}-${Date.now()}`
         req.body.external_id = `mutual_${merOrderNo}-${crypto.randomUUID()}`
         console.log('[InternalPaymentsController.applySplit] ⚠️ external_id não fornecido, gerando automaticamente:', req.body.external_id)
       } else if (req.body.externalId && !req.body.external_id) {
+        // Se foi enviado como externalId (camelCase), converter para external_id (snake_case)
         req.body.external_id = req.body.externalId
       }
       
@@ -195,11 +200,12 @@ class InternalPaymentsController {
         throw new HttpError(400, 'InvalidUserId')
       }
 
-      const originalAmount = Number(value.amount) 
+      const originalAmount = Number(value.amount) // Valor recebido (pode ser líquido ou bruto)
       const currency = (value.currency || 'BRL').toUpperCase()
       let houseAmount = Number(value.houseAmount || 0)
       let netAmount = originalAmount
 
+      // Se houseAmount não foi fornecido ou é 0, calcular a taxa automaticamente
       if (!houseAmount || houseAmount <= 0) {
         console.log('[InternalPaymentsController.applySplit] houseAmount não fornecido, calculando taxa automaticamente...', {
           userId,
@@ -209,6 +215,7 @@ class InternalPaymentsController {
         try {
           const fees = await UserFeeModel.getByUserId(userId)
           if (fees) {
+            // Calcular taxa fixa + percentual
             houseAmount = UserFeeModel.calculatePixInFee(originalAmount, fees)
             
             console.log('[InternalPaymentsController.applySplit] Taxa calculada:', {
@@ -221,14 +228,15 @@ class InternalPaymentsController {
               }
             })
           } else {
-            console.log('[InternalPaymentsController.applySplit]  Nenhuma taxa configurada para o usuário')
+            console.log('[InternalPaymentsController.applySplit] ⚠️ Nenhuma taxa configurada para o usuário')
           }
         } catch (feeError) {
           console.error('[InternalPaymentsController.applySplit] Erro ao calcular taxa:', feeError.message)
-      
+          // Continuar sem taxa se houver erro
         }
       } else {
-  
+        // Se houseAmount já foi fornecido, significa que o gateway já descontou a taxa
+        // Neste caso, o originalAmount já é o valor líquido
         console.log('[InternalPaymentsController.applySplit] houseAmount já fornecido pelo gateway, amount já é líquido:', {
           originalAmount,
           houseAmount,
@@ -236,16 +244,18 @@ class InternalPaymentsController {
         })
       }
 
+      // Para depósito: se houseAmount foi fornecido, amount já é líquido
+      // Se não foi fornecido, calcular líquido = total - taxa
       if (houseAmount > 0 && value.houseAmount) {
- 
+        // houseAmount foi fornecido explicitamente, então amount já é líquido
         netAmount = originalAmount
         console.log('[InternalPaymentsController.applySplit] houseAmount fornecido - amount já é líquido, não descontar novamente')
       } else if (houseAmount > 0) {
-
+        // houseAmount foi calculado, então precisamos descontar
         netAmount = originalAmount - houseAmount
         console.log('[InternalPaymentsController.applySplit] houseAmount calculado - descontando do amount')
       } else {
-    
+        // Sem taxa, valor líquido = valor total
         netAmount = originalAmount
         console.log('[InternalPaymentsController.applySplit] Sem taxa - valor líquido = valor total')
       }
@@ -262,9 +272,9 @@ class InternalPaymentsController {
       if (!wallet) wallet = await WalletModel.createUserWallet(userId, currency)
 
       const current = Number(wallet.balance) || 0
-      const newBalance = current + netAmount 
+      const newBalance = current + netAmount // Creditar valor líquido (total - taxa)
 
-      console.log('[InternalPaymentsController.applySplit]  Aplicando crédito na carteira:', {
+      console.log('[InternalPaymentsController.applySplit] 💰 Aplicando crédito na carteira:', {
         userId,
         currentBalance: current,
         originalAmount,
@@ -275,11 +285,14 @@ class InternalPaymentsController {
 
       await WalletModel.updateBalance(wallet.id, newBalance)
 
-      console.log('[InternalPaymentsController.applySplit]  Saldo atualizado com sucesso');
+      console.log('[InternalPaymentsController.applySplit] ✅ Saldo atualizado com sucesso');
+
+      // Criar entrada de crédito no ledger
+      // IMPORTANTE: A descrição deve conter "DEPÓSITO PIX" para o frontend detectar corretamente
       await LedgerModel.addEntry({
         walletId: wallet.id,
         direction: 'CREDIT',
-        amount: netAmount, 
+        amount: netAmount, // Creditar valor líquido
         description: `Depósito PIX ${value.provider || 'GATEWAY'} - merOrderNo=${
           value.merOrderNo || ''
         }`,
@@ -290,10 +303,10 @@ class InternalPaymentsController {
           source: value.provider === 'PAYZU' ? 'WEBHOOK_PAYZU_DEPOSIT' : 'WEBHOOK_STARPAGO_DEPOSIT',
           previousBalance: current,
           newBalance,
-          originalAmount, 
-          feeAmount: houseAmount, 
-          netAmount, 
-          totalAmount: originalAmount, 
+          originalAmount, // Valor total depositado
+          feeAmount: houseAmount, // Taxa
+          netAmount, // Valor líquido creditado
+          totalAmount: originalAmount, // Valor total depositado (para compatibilidade)
           orderNo: value.providerOrderNo || value.merOrderNo || null,
           merOrderNo: value.merOrderNo || null,
           providerOrderNo: value.providerOrderNo || null
@@ -310,6 +323,7 @@ class InternalPaymentsController {
         netAmount
       });
 
+      // Creditar taxa na tesouraria se houver
       if (houseAmount > 0) {
         await this.creditHouseWallet({
           currency,
@@ -322,16 +336,16 @@ class InternalPaymentsController {
           externalId: value.external_id
         })
       } else {
-        console.log('[InternalPaymentsController.applySplit] Nenhuma taxa a ser creditada (houseAmount = 0)')
+        console.log('[InternalPaymentsController.applySplit] ⚠️ Nenhuma taxa a ser creditada (houseAmount = 0)')
       }
 
-      console.log('[InternalPaymentsController.applySplit] CRÉDITO PROCESSADO COM SUCESSO ');
+      console.log('[InternalPaymentsController.applySplit] ✅✅✅ CRÉDITO PROCESSADO COM SUCESSO ✅✅✅');
       console.log('[InternalPaymentsController.applySplit] Resumo:', {
         userId,
         walletId: wallet.id,
-        originalAmount, 
-        netAmount, 
-        houseAmount, 
+        originalAmount, // Valor total depositado
+        netAmount, // Valor líquido creditado
+        houseAmount, // Taxa
         currency,
         balance: newBalance,
         previousBalance: current
@@ -342,9 +356,9 @@ class InternalPaymentsController {
         ok: true,
         userId,
         walletId: wallet.id,
-        originalAmount, 
-        netAmount, 
-        houseAmount, 
+        originalAmount, // Valor total depositado
+        netAmount, // Valor líquido creditado
+        houseAmount, // Taxa
         currency,
         balance: newBalance
       })
@@ -367,16 +381,24 @@ class InternalPaymentsController {
   async applyWithdraw(req, res, next) {
     try {
       console.log('[InternalPaymentsController.applyWithdraw] ========================================');
-      console.log('[InternalPaymentsController.applyWithdraw]  INICIANDO PROCESSAMENTO DE DÉBITO');
+      console.log('[InternalPaymentsController.applyWithdraw] 🚀 INICIANDO PROCESSAMENTO DE DÉBITO');
       console.log('[InternalPaymentsController.applyWithdraw] ========================================');
       console.log('[InternalPaymentsController.applyWithdraw] Payload recebido:', req.body);
+      
+      if (!req.body.external_id && !req.body.externalId) {
+        const merOrderNo = req.body.merOrderNo || `withdraw-${req.body.userId || 'unknown'}-${Date.now()}`
+        req.body.external_id = `mutual_${merOrderNo}-${crypto.randomUUID()}`
+        console.log('[InternalPaymentsController.applyWithdraw] ⚠️ external_id não fornecido, gerando automaticamente:', req.body.external_id)
+      } else if (req.body.externalId && !req.body.external_id) {
+        req.body.external_id = req.body.externalId
+      }
       
       const { value, error } = paymentSchema.validate(req.body, {
         abortEarly: false
       })
 
       if (error) {
-        console.error('[InternalPaymentsController.applyWithdraw]  Erro de validação:', error.details);
+        console.error('[InternalPaymentsController.applyWithdraw] ❌ Erro de validação:', error.details);
         throw new HttpError(400, 'ValidationError', {
           details: error.details.map(d => d.message)
         })
@@ -390,11 +412,11 @@ class InternalPaymentsController {
         throw new HttpError(400, 'InvalidUserId')
       }
 
-      const amount = Number(value.amount) 
+      const amount = Number(value.amount) // Valor líquido a ser enviado
       const currency = (value.currency || 'BRL').toUpperCase()
       let houseAmount = Number(value.houseAmount || 0)
 
-    
+      // Se houseAmount não foi fornecido ou é 0, calcular a taxa automaticamente
       if (!houseAmount || houseAmount <= 0) {
         console.log('[InternalPaymentsController.applyWithdraw] houseAmount não fornecido, calculando taxa automaticamente...', {
           userId,
@@ -404,7 +426,7 @@ class InternalPaymentsController {
         try {
           const fees = await UserFeeModel.getByUserId(userId)
           if (fees) {
-
+            // Calcular taxa fixa + percentual
             houseAmount = UserFeeModel.calculatePixOutFee(amount, fees)
             
             console.log('[InternalPaymentsController.applyWithdraw] Taxa calculada:', {
@@ -417,11 +439,11 @@ class InternalPaymentsController {
               }
             })
           } else {
-            console.log('[InternalPaymentsController.applyWithdraw] Nenhuma taxa configurada para o usuário')
+            console.log('[InternalPaymentsController.applyWithdraw] ⚠️ Nenhuma taxa configurada para o usuário')
           }
         } catch (feeError) {
           console.error('[InternalPaymentsController.applyWithdraw] Erro ao calcular taxa:', feeError.message)
-        
+          // Continuar sem taxa se houver erro
         }
       }
 
@@ -437,7 +459,7 @@ class InternalPaymentsController {
       if (!wallet) wallet = await WalletModel.createUserWallet(userId, currency)
 
       const current = Number(wallet.balance) || 0
-
+      // Para saque: valor total debitado = valor líquido + taxa
       const totalAmount = amount + houseAmount
       const newBalance = current - totalAmount
 
@@ -451,7 +473,7 @@ class InternalPaymentsController {
         })
       }
 
-      console.log('[InternalPaymentsController.applyWithdraw]  Aplicando débito na carteira:', {
+      console.log('[InternalPaymentsController.applyWithdraw] 💰 Aplicando débito na carteira:', {
         userId,
         currentBalance: current,
         withdrawAmount: amount,
@@ -462,13 +484,17 @@ class InternalPaymentsController {
 
       await WalletModel.updateBalance(wallet.id, newBalance)
 
-      console.log('[InternalPaymentsController.applyWithdraw] Saldo atualizado com sucesso');
+      console.log('[InternalPaymentsController.applyWithdraw] ✅ Saldo atualizado com sucesso');
 
-
+      // Criar duas entradas DEBIT separadas:
+      // 1. Débito do valor líquido (sem taxa)
+      // 2. Débito da taxa (se houver)
+      
+      // Entrada 1: Valor líquido do saque
       await LedgerModel.addEntry({
         walletId: wallet.id,
         direction: 'DEBIT',
-        amount: amount, 
+        amount: amount, // Valor líquido (sem taxa)
         description: `Saque ${value.provider || 'GATEWAY'} - merOrderNo=${
           value.merOrderNo || ''
         }`,
@@ -479,20 +505,20 @@ class InternalPaymentsController {
           source: 'WEBHOOK_STARPAGO_WITHDRAW',
           previousBalance: current,
           newBalance,
-          originalAmount: amount, 
-          feeAmount: houseAmount, 
-          totalAmount, 
-          netAmount: amount 
+          originalAmount: amount, // Valor líquido
+          feeAmount: houseAmount, // Taxa
+          totalAmount, // Valor total debitado
+          netAmount: amount // Valor líquido sacado
         },
         externalId: value.external_id
       })
 
-     
+      // Entrada 2: Taxa do saque (se houver)
       if (houseAmount > 0) {
         await LedgerModel.addEntry({
           walletId: wallet.id,
           direction: 'DEBIT',
-          amount: houseAmount, 
+          amount: houseAmount, // Taxa debitada
           description: `Taxa de transação - PIX OUT - merOrderNo=${
             value.merOrderNo || ''
           }`,
@@ -503,14 +529,15 @@ class InternalPaymentsController {
             source: 'WEBHOOK_STARPAGO_WITHDRAW',
             transactionType: 'PIX_OUT_FEE',
             feeType: 'TRANSACTION_FEE',
-            originalAmount: amount, 
-            feeAmount: houseAmount, 
-            totalAmount, 
+            originalAmount: amount, // Valor líquido do saque
+            feeAmount: houseAmount, // Taxa debitada
+            totalAmount, // Valor total debitado
             relatedTransaction: 'PIX_WITHDRAW'
           },
           externalId: `${value.external_id}-fee`
         })
 
+        // Creditar taxa na tesouraria
         await this.creditHouseWallet({
           currency,
           houseAmount,
@@ -522,16 +549,16 @@ class InternalPaymentsController {
           externalId: value.external_id
         })
       } else {
-        console.log('[InternalPaymentsController.applyWithdraw]  Nenhuma taxa a ser debitada (houseAmount = 0)')
+        console.log('[InternalPaymentsController.applyWithdraw] ⚠️ Nenhuma taxa a ser debitada (houseAmount = 0)')
       }
 
-      console.log('[InternalPaymentsController.applyWithdraw]  DÉBITO PROCESSADO COM SUCESSO ');
+      console.log('[InternalPaymentsController.applyWithdraw] ✅✅✅ DÉBITO PROCESSADO COM SUCESSO ✅✅✅');
       console.log('[InternalPaymentsController.applyWithdraw] Resumo:', {
         userId,
         walletId: wallet.id,
-        amount, 
-        houseAmount, 
-        totalAmount, 
+        amount, // Valor líquido
+        houseAmount, // Taxa
+        totalAmount, // Valor total debitado
         currency,
         balance: newBalance,
         previousBalance: current
@@ -542,9 +569,9 @@ class InternalPaymentsController {
         ok: true,
         userId,
         walletId: wallet.id,
-        amount, 
-        houseAmount, 
-        totalAmount, 
+        amount, // Valor líquido
+        houseAmount, // Taxa
+        totalAmount, // Valor total debitado
         currency,
         balance: newBalance
       })

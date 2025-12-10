@@ -1,11 +1,16 @@
 import Joi from 'joi'
 import axios from 'axios'
 import jwt from 'jsonwebtoken'
-import { WalletModel } from '../models/WalletModel.js'
+import crypto from 'crypto'
+import { UserModel } from '../models/UserModel.js'
 import { LedgerModel } from '../models/LedgerModel.js'
-import { GatewayTransactionModel } from '../models/GatewayTransactionModel.js'
-import { WebhookLogModel } from '../models/WebhookLogModel.js'
 import { HttpError } from '../core/HttpError.js'
+import { WalletModel } from '../models/WalletModel.js'
+import { GatewayTransactionModel } from '../models/GatewayTransactionModel.js'
+import { UserFeeModel } from '../models/UserFeeModel.js'
+import { TwoFactorAuthModel } from '../models/TwoFactorAuthModel.js'
+import { WebhookLogModel } from '../models/WebhookLogModel.js'
+import { TotpService } from '../services/TotpService.js'
 import { env } from '../config/env.js'
 
 const mutateSchema = Joi.object({
@@ -20,12 +25,161 @@ const GATEWAY_BASE_URL = env.GATEWAY_BASE_URL || 'https://payg2a.online'
 const GATEWAY_OPERATOR_ID = Number(env.GATEWAY_OPERATOR_ID || 1)
 const JWT_OPERATOR_SECRET = env.JWT_OPERATOR_SECRET || 'mutual-secret-2025'
 
+function buildStandardWebhookPayload(transactionType, data) {
+  const basePayload = {
+    merOrderNo: data.merOrderNo || null,
+    orderNo: data.orderNo || null,
+    tradeNo: data.tradeNo || null,
+    status: data.status || (transactionType === 'DEPOSIT' || transactionType === 'PIX_IN' ? 'waiting_payment' : 'pending'),
+    amount: data.amount || data.totalAmount || 0,
+    userId: data.userId || null,
+    type: transactionType === 'DEPOSIT' || transactionType === 'PIX_IN' ? 'DEPOSIT' : 'WITHDRAW',
+    timestamp: new Date().toISOString()
+  }
+
+  if (transactionType === 'DEPOSIT' || transactionType === 'PIX_IN') {
+    basePayload.netAmount = data.netAmount || null
+    basePayload.feeAmount = data.feeAmount || null
+    basePayload.totalAmount = data.totalAmount || data.amount || null
+  } else {
+    basePayload.netAmount = data.netAmount || null
+    basePayload.feeAmount = data.feeAmount || null
+    basePayload.totalAmount = data.totalAmount || null
+  }
+
+  if (data.externalId) {
+    basePayload.externalId = data.externalId
+  }
+
+  return basePayload
+}
+
+async function sendWebhookToUser(user, transactionType, data) {
+  let targetUrl = null
+
+  if (transactionType === 'DEPOSIT' || transactionType === 'PIX_IN') {
+    targetUrl = user.webhook_url_pix_in || user.webhook_url || null
+  } else if (transactionType === 'WITHDRAW' || transactionType === 'PIX_OUT') {
+    targetUrl = user.webhook_url_pix_out || user.webhook_url || null
+  } else {
+    targetUrl = user.webhook_url || null
+  }
+
+  if (!targetUrl) {
+    console.log('[sendWebhookToUser] Nenhuma URL de webhook configurada para o usuário:', user.id)
+    return null
+  }
+
+  const payload = buildStandardWebhookPayload(transactionType, data)
+
+  const start = Date.now()
+  try {
+    const response = await axios.post(targetUrl, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 10000
+    })
+    const latency = Date.now() - start
+
+    WebhookLogModel.insert({
+      event_type: transactionType === 'DEPOSIT' || transactionType === 'PIX_IN' ? 'PIX_DEPOSIT_WEBHOOK' : 'PIX_WITHDRAW_WEBHOOK',
+      transaction_id: payload.orderNo || payload.tradeNo || payload.merOrderNo || null,
+      target_url: targetUrl,
+      http_status: response.status,
+      latency_ms: latency,
+      status: response.status >= 200 && response.status < 300 ? 'delivered' : 'failed',
+      payload: payload,
+      response_body: JSON.stringify(response.data || null),
+      error: null
+    }).catch(err => console.error('[sendWebhookToUser] Erro ao registrar log:', err.message))
+
+    console.log('[sendWebhookToUser] ✅ Webhook enviado com sucesso:', {
+      userId: user.id,
+      transactionType,
+      targetUrl,
+      status: response.status,
+      latency
+    })
+
+    return { success: true, status: response.status, latency }
+  } catch (error) {
+    const latency = Date.now() - start
+    const status = error.response?.status || null
+    const responseBody = error.response?.data ? JSON.stringify(error.response.data) : null
+
+    WebhookLogModel.insert({
+      event_type: transactionType === 'DEPOSIT' || transactionType === 'PIX_IN' ? 'PIX_DEPOSIT_WEBHOOK' : 'PIX_WITHDRAW_WEBHOOK',
+      transaction_id: payload.orderNo || payload.tradeNo || payload.merOrderNo || null,
+      target_url: targetUrl,
+      http_status: status,
+      latency_ms: latency,
+      status: 'failed',
+      payload: payload,
+      response_body: responseBody,
+      error: error.message || 'Request failed'
+    }).catch(err => console.error('[sendWebhookToUser] Erro ao registrar log:', err.message))
+
+    console.error('[sendWebhookToUser] ❌ Erro ao enviar webhook:', {
+      userId: user.id,
+      transactionType,
+      targetUrl,
+      error: error.message,
+      status
+    })
+
+    return { success: false, status, error: error.message }
+  }
+}
+
 export class WalletController {
   async getBalance(req, res, next) {
     try {
-      const userId = Number(req.params.id)
-      const user = await UserModel.findById(userId)
-      if (!user) throw new HttpError(404, 'UserNotFound')
+      const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
+      const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
+
+      let userId = null
+      let user = null
+
+      if (req.params.id) {
+        userId = Number(req.params.id)
+        user = await UserModel.findById(userId)
+        if (!user) throw new HttpError(404, 'UserNotFound')
+      } else {
+        if (!appId) {
+          return res.status(400).json({
+            ok: false,
+            error: 'MissingAppId',
+            message: 'O header app_id é obrigatório para autenticação.'
+          })
+        }
+
+        if (!clientId) {
+          return res.status(400).json({
+            ok: false,
+            error: 'MissingClientId',
+            message: 'O header client_id é obrigatório para autenticação.'
+          })
+        }
+
+        user = await UserModel.findByAppId(appId)
+
+        if (!user) {
+          return res.status(401).json({
+            ok: false,
+            error: 'InvalidAppId',
+            message: 'app_id inválido ou não encontrado.'
+          })
+        }
+
+        if (clientId !== appId && clientId !== user.client_secret) {
+          return res.status(401).json({
+            ok: false,
+            error: 'InvalidClientId',
+            message: 'client_id inválido ou não corresponde às credenciais.'
+          })
+        }
+
+        userId = user.id
+      }
 
       let wallet = await WalletModel.getUserWallet(userId, 'BRL')
       if (!wallet) wallet = await WalletModel.createUserWallet(userId, 'BRL')
@@ -42,28 +196,64 @@ export class WalletController {
 
   async ledger(req, res, next) {
     try {
+      const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
+      const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
+
+      let userId = null
+      let user = null
+
       const rawUserId =
         req.user?.id ||
         req.user?.userId ||
         req.user?.user_id ||
         req.params.id ||
         req.params.userId ||
-        req.params.user_id ||
-        req.body.userId ||
-        req.body.user_id ||
-        req.query.userId ||
-        req.query.user_id
+        req.params.user_id
 
-      if (!rawUserId) throw new HttpError(400, 'MissingUserId')
+      if (rawUserId) {
+        userId = typeof rawUserId === 'string' ? parseInt(rawUserId, 10) : rawUserId
+        if (!Number.isFinite(userId) || userId <= 0) {
+          throw new HttpError(400, 'InvalidUserId')
+        }
+        user = await UserModel.findById(userId)
+        if (!user) throw new HttpError(404, 'UserNotFound')
+      } else {
+        if (!appId) {
+          return res.status(400).json({
+            ok: false,
+            error: 'MissingAppId',
+            message: 'O header app_id é obrigatório para autenticação.'
+          })
+        }
 
-      const userId =
-        typeof rawUserId === 'string' ? parseInt(rawUserId, 10) : rawUserId
+        if (!clientId) {
+          return res.status(400).json({
+            ok: false,
+            error: 'MissingClientId',
+            message: 'O header client_id é obrigatório para autenticação.'
+          })
+        }
 
-      if (!Number.isFinite(userId) || userId <= 0)
-        throw new HttpError(400, 'InvalidUserId')
+        user = await UserModel.findByAppId(appId)
 
-      const user = await UserModel.findById(userId)
-      if (!user) throw new HttpError(404, 'UserNotFound')
+        if (!user) {
+          return res.status(401).json({
+            ok: false,
+            error: 'InvalidAppId',
+            message: 'app_id inválido ou não encontrado.'
+          })
+        }
+
+        if (clientId !== appId && clientId !== user.client_secret) {
+          return res.status(401).json({
+            ok: false,
+            error: 'InvalidClientId',
+            message: 'client_id inválido ou não corresponde às credenciais.'
+          })
+        }
+
+        userId = user.id
+      }
 
       let wallet = await WalletModel.getUserWallet(userId, 'BRL')
       if (!wallet) wallet = await WalletModel.createUserWallet(userId, 'BRL')
@@ -79,7 +269,7 @@ export class WalletController {
           try {
             meta = JSON.parse(meta)
           } catch {
-   
+            // Tentar parsear como JSONB do PostgreSQL
             try {
               meta = JSON.parse(meta.replace(/\\"/g, '"').replace(/\\\\/g, '\\'))
             } catch {
@@ -92,7 +282,7 @@ export class WalletController {
         let document = meta.document || meta.payer_document || meta.payerCPF || null
         let name = meta.payer_name || meta.name || null
 
- 
+        // Inicializar newMeta antes de usar
         const newMeta = { ...meta }
 
         if (!tradeNo || !document) {
@@ -107,7 +297,7 @@ export class WalletController {
           if (tx) {
             const raw = tx.raw_response
 
-        
+            // Incluir raw_response no meta para o front-end poder extrair todos os dados
             if (raw) {
               try {
                 const parsedRaw = typeof raw === 'string' ? JSON.parse(raw) : raw
@@ -169,6 +359,8 @@ export class WalletController {
         out.document = document
         out.name = name || null
         out.meta = newMeta
+
+        // Preservar descrição de taxa de transação
         if (meta.feeType === 'TRANSACTION_FEE' || /Taxa de transação/i.test(out.description || '')) {
           out.description = 'Taxa de transação'
         } else if (tradeNo && typeof out.description === 'string') {
@@ -273,6 +465,7 @@ export class WalletController {
 
   async pixDeposit(req, res, next) {
     try {
+      // Headers OBRIGATÓRIOS para segurança
       const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
       const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
 
@@ -292,7 +485,7 @@ export class WalletController {
         })
       }
 
-      const { amount, userId, payerName, payerCPF } = req.body || {}
+      const { amount, payerName, payerCPF } = req.body || {}
 
       if (!amount || Number(amount) <= 0) {
         return res.status(400).json({
@@ -311,68 +504,25 @@ export class WalletController {
         })
       }
 
-      const rawUserId = userId ?? req.query.userId ?? req.query.user_id
-      let user = null
-      let finalUserId = null
+      const user = await UserModel.findByAppId(appId)
 
-      if (rawUserId) {
-        const providedUserId = typeof rawUserId === 'string' ? parseInt(rawUserId, 10) : rawUserId
-        if (!Number.isFinite(providedUserId) || providedUserId <= 0) {
-          return res.status(400).json({
-            ok: false,
-            error: 'InvalidUserId',
-            message: 'userId inválido.'
-          })
-        }
-
-        user = await UserModel.findById(providedUserId)
-        
-        if (!user) {
-          return res.status(404).json({
-            ok: false,
-            error: 'UserNotFound',
-            message: 'Usuário não encontrado.'
-          })
-        }
-        if (user.app_id && user.app_id !== appId) {
-          console.log('[pixDeposit]  app_id enviado não corresponde ao usuário, mas userId foi fornecido (permitindo para compatibilidade):', {
-            userId: providedUserId,
-            appIdEnviado: appId,
-            appIdUsuario: user.app_id
-          })
-        }
-
-        if (user.client_secret) {
-          if (clientId !== appId && clientId !== user.client_secret) {
-            if (clientId !== appId) {
-              console.log('[pixDeposit]  client_id não corresponde, mas userId foi fornecido (permitindo para compatibilidade)')
-    
-            }
-          }
-        }
-
-        finalUserId = providedUserId
-      } else {
-        user = await UserModel.findByAppId(appId)
-        
-        if (!user) {
-          return res.status(401).json({
-            ok: false,
-            error: 'InvalidAppId',
-            message: 'app_id inválido ou não encontrado.'
-          })
-        }
-
-        if (clientId !== appId && clientId !== user.client_secret) {
-          return res.status(401).json({
-            ok: false,
-            error: 'InvalidClientId',
-            message: 'client_id inválido ou não corresponde às credenciais.'
-          })
-        }
-
-        finalUserId = user.id
+      if (!user) {
+        return res.status(401).json({
+          ok: false,
+          error: 'InvalidAppId',
+          message: 'app_id inválido ou não encontrado.'
+        })
       }
+
+      if (clientId !== appId && clientId !== user.client_secret) {
+        return res.status(401).json({
+          ok: false,
+          error: 'InvalidClientId',
+          message: 'client_id inválido ou não corresponde às credenciais.'
+        })
+      }
+
+      const finalUserId = user.id
 
       const merOrderNo = `user-${finalUserId}-${Date.now()}`
 
@@ -438,7 +588,7 @@ export class WalletController {
         d.params?.emv ||
         d.params?.brCode ||
         d.qrCodeText ||
-        d.raw.qrCodeText || 
+        d.raw.qrCodeText ||
         'https://digital.mundipagg.com/pix/'
 
       const finalAmount = d.amount !== undefined ? d.amount : Number(amount)
@@ -447,22 +597,32 @@ export class WalletController {
       const estimatedFee = Math.round((finalAmount * spreadPercentage / 100) + fixedAmount)
       const netAmount = finalAmount - estimatedFee
 
+      const externalId = req.body.external_id || req.body.externalId || `mutual_${merOrderNo}-${crypto.randomUUID()}`
+
+      const orderNo = d.orderNo || d.externalRef || null
+      const tradeNo = d.tradeNo || d.endToEndId || null
+
       try {
-        await WebhookLogModel.insert({
-          event_type: 'PIX_CREATED',
-          transaction_id: d.orderNo || merOrderNo || null,
-          target_url: user.webhook_url || req.headers['x-webhook-url'] || null,
-          status: 'pending',
-          payload: {
-            userId: finalUserId,
-            amount: finalAmount,
-            provider: user.provider || 'PAYZU',
-            merOrderNo,
-            gateway: d
-          }
+        const { totalAmount, feeAmount, netAmount: calculatedNetAmount } = await this.calculatePixInFee(finalUserId, finalAmount)
+
+        const webhookData = {
+          merOrderNo,
+          orderNo,
+          tradeNo,
+          status: 'waiting_payment',
+          amount: totalAmount,
+          netAmount: calculatedNetAmount,
+          feeAmount,
+          totalAmount,
+          userId: finalUserId,
+          externalId
+        }
+
+        sendWebhookToUser(user, 'DEPOSIT', webhookData).catch(err => {
+          console.error('[pixDeposit] Erro ao enviar webhook imediato (não bloqueante):', err.message)
         })
       } catch (e) {
-        console.log('[pixDeposit] webhook_logs insert failed:', e?.message)
+        console.log('[pixDeposit] Erro ao calcular taxa para webhook:', e?.message)
       }
 
       return res.status(200).json({
@@ -595,7 +755,7 @@ export class WalletController {
             }
           })
 
-    
+          // Registrar webhook entregue para PIX IN
           try {
             await WebhookLogModel.insert({
               event_type: 'PIX_COMPLETED',
@@ -620,7 +780,7 @@ export class WalletController {
 
   async pixWithdraw(req, res, next) {
     try {
- 
+      // Headers OBRIGATÓRIOS para segurança
       const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
       const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
 
@@ -643,14 +803,13 @@ export class WalletController {
       const pixWithdrawSchema = Joi.object({
         amount: Joi.number().positive().required(),
         key: Joi.string().required(),
-        keyType: Joi.string().valid('cpf', 'cnpj', 'email', 'mobile', 'evp').required(),
-        userId: Joi.number().integer().positive().optional(),
-        user_id: Joi.number().integer().positive().optional(),
+        keyType: Joi.string().valid('cpf', 'cnpj', 'email', 'mobile', 'evp', 'CPF', 'CNPJ', 'EMAIL', 'PHONE', 'EVP').required(),
         bankCode: Joi.string().optional(),
         extra: Joi.object().unknown(true).default({}),
         orderId: Joi.string().optional(),
-        externalId: Joi.string()
-      })
+        externalId: Joi.string().optional(),
+        userId: Joi.number().optional()
+      }).unknown(true)
 
       const { value, error } = pixWithdrawSchema.validate(req.body, {
         abortEarly: false
@@ -664,64 +823,38 @@ export class WalletController {
         throw new HttpError(400, 'InvalidRequest', { message: 'Valor do saque é obrigatório' })
       }
 
-      const rawUserId = value.userId || value.user_id || req.params.id
-      let user = null
-      let userId = null
-
-      if (rawUserId) {
-        const providedUserId = typeof rawUserId === 'string' ? parseInt(rawUserId, 10) : rawUserId
-        if (!Number.isFinite(providedUserId) || providedUserId <= 0) {
-          throw new HttpError(400, 'InvalidUserId', { message: 'userId inválido.' })
+      if (value.keyType) {
+        const normalizedKeyType = value.keyType.toLowerCase()
+        if (normalizedKeyType === 'phone') {
+          value.keyType = 'mobile'
+        } else {
+          value.keyType = normalizedKeyType
         }
-
-        user = await UserModel.findById(providedUserId)
-        
-        if (!user) {
-          throw new HttpError(404, 'UserNotFound', { message: 'Usuário não encontrado' })
-        }
-        if (user.app_id && user.app_id !== appId) {
-          console.log('[pixWithdraw] app_id enviado não corresponde ao usuário, mas userId foi fornecido (permitindo para compatibilidade):', {
-            userId: providedUserId,
-            appIdEnviado: appId,
-            appIdUsuario: user.app_id
-          })
-        }
-
-      
-        if (user.client_secret) {
-          if (clientId !== appId && clientId !== user.client_secret) {
-            if (clientId !== appId) {
-              console.log('[pixWithdraw]  client_id não corresponde, mas userId foi fornecido (permitindo para compatibilidade)')
-              
-            }
-          }
-        }
-
-        userId = providedUserId
-      } else {
-     
-        user = await UserModel.findByAppId(appId)
-        
-        if (!user) {
-          return res.status(401).json({
-            ok: false,
-            error: 'InvalidAppId',
-            message: 'app_id inválido ou não encontrado.'
-          })
-        }
-
-   
-        if (clientId !== appId && clientId !== user.client_secret) {
-          return res.status(401).json({
-            ok: false,
-            error: 'InvalidClientId',
-            message: 'client_id inválido ou não corresponde às credenciais.'
-          })
-        }
-
-        userId = user.id
       }
 
+      const user = await UserModel.findByAppId(appId)
+
+      if (!user) {
+        return res.status(401).json({
+          ok: false,
+          error: 'InvalidAppId',
+          message: 'app_id inválido ou não encontrado.'
+        })
+      }
+
+      if (clientId !== appId && clientId !== user.client_secret) {
+        return res.status(401).json({
+          ok: false,
+          error: 'InvalidClientId',
+          message: 'client_id inválido ou não corresponde às credenciais.'
+        })
+      }
+
+      const userId = user.id
+
+      // Enforce 2FA enabled for withdrawals
+      // NOTA: O código 2FA já é verificado no frontend através do endpoint /api/2fa/verify
+      // antes de chamar este endpoint. Aqui apenas verificamos se o 2FA está ativado.
       const twofa = await TwoFactorAuthModel.findByUserId(Number(userId))
       const twofaEnabled = Boolean(twofa && twofa.enabled === true)
 
@@ -733,6 +866,11 @@ export class WalletController {
         })
       }
 
+      // O código 2FA já foi verificado no frontend através do endpoint /api/2fa/verify
+      // que possui toda a lógica de auditoria, bloqueio após tentativas, etc.
+      // Não é necessário validar novamente aqui para evitar validação duplicada.
+
+      // Obter wallet do usuário
       let wallet = await WalletModel.getUserWallet(userId, 'BRL')
       if (!wallet) wallet = await WalletModel.createUserWallet(userId, 'BRL')
 
@@ -742,6 +880,7 @@ export class WalletController {
         throw new HttpError(400, 'InvalidAmount', { message: 'Valor do saque deve ser maior que zero' })
       }
 
+      // Calcular taxa de PIX OUT
       console.log('[pixWithdraw] === INÍCIO ===', {
         userId,
         withdrawAmount,
@@ -760,7 +899,7 @@ export class WalletController {
         currentBalance: wallet.balance
       })
 
-
+      // Validar saldo suficiente
       if (Number(wallet.balance) < totalAmount) {
         console.error('[pixWithdraw] ❌ Saldo insuficiente:', {
           currentBalance: wallet.balance,
@@ -777,7 +916,7 @@ export class WalletController {
         })
       }
 
-      console.log('[pixWithdraw] Saldo suficiente, prosseguindo com o saque...')
+      console.log('[pixWithdraw] ✅ Saldo suficiente, prosseguindo com o saque...')
 
       const typeMap = {
         cpf: 'CPF',
@@ -812,10 +951,10 @@ export class WalletController {
         document: payerCPF
       }
 
-
+      // Para chaves PHONE, adicionar informações extras
       if (mappedType === 'PHONE') {
         const cleanPhone = value.key.replace(/\D/g, '')
-      
+        // Validar que telefone tenha 13 dígitos (formato: 5511999999999)
         if (cleanPhone.length !== 13) {
           throw new HttpError(400, 'InvalidPhoneKey', {
             message: 'Chave PIX telefone deve ter 13 dígitos (formato: 5511999999999). Exemplo: 5511999999999',
@@ -845,13 +984,19 @@ export class WalletController {
       )
 
       const finalOrderId = value.orderId || `withdraw-${user.id}-${Date.now()}`
+
+      // Preparar payload do gateway
+      // O gateway REQUER: orderId, accountNumber, accountType, accountHolder
+      // O gateway NÃO ACEITA: pixKey, pixType, clientReference, callbackUrl
+
+      // Preparar accountNumber (chave PIX) conforme o tipo
       let accountNumber = value.key
-      
+
       if (mappedType === 'CPF' || mappedType === 'CNPJ') {
-    
+        // Chave CPF/CNPJ: remover formatação
         accountNumber = value.key.replace(/\D/g, '')
       } else if (mappedType === 'PHONE') {
-      
+        // Chave telefone: remover formatação e validar 13 dígitos
         const cleanPhone = value.key.replace(/\D/g, '')
         if (cleanPhone.length !== 13) {
           throw new HttpError(400, 'InvalidPhoneKey', {
@@ -862,34 +1007,36 @@ export class WalletController {
         }
         accountNumber = cleanPhone
       } else if (mappedType === 'EMAIL') {
-      
+        // Chave EMAIL: usar como está
         accountNumber = value.key.trim()
       } else {
-
+        // EVP (chave aleatória): usar como está
         accountNumber = value.key
       }
-      
 
+      // Montar payload conforme formato esperado pelo gateway
       const gatewayPayload = {
-        orderId: finalOrderId, 
-        userId: Number(user.id), 
-        amount: Number(withdrawAmount), 
-        accountNumber: accountNumber, 
-        accountType: mappedType, 
-        accountHolder: { 
+        orderId: finalOrderId, // Obrigatório
+        userId: Number(user.id), // Garantir que userId seja enviado para salvar na transação
+        amount: Number(withdrawAmount), // Valor líquido a ser enviado (sem taxa)
+        accountNumber: accountNumber, // Obrigatório - chave PIX de destino
+        accountType: mappedType, // Obrigatório - tipo da chave (CPF, CNPJ, EMAIL, PHONE, EVP)
+        accountHolder: { // Obrigatório
           name: payerName,
           document: payerCPF
         }
       }
-      
-  
+
+      // Adicionar campos opcionais se necessário
       if (value.bankCode) {
         gatewayPayload.bankCode = String(value.bankCode)
       }
-      
+
+      // Manter informações extras no objeto separado para uso interno (não enviar ao gateway)
       const internalExtra = {
         ...(extra || {}),
         userId: Number(user.id),
+        // Informações de taxa para o webhook processar
         calculatedFee: {
           originalAmount: withdrawAmount,
           totalAmount,
@@ -907,7 +1054,7 @@ export class WalletController {
         feeAmount,
         netAmount,
         accountType: mappedType,
-        accountNumber: accountNumber.substring(0, 10) + '...', 
+        accountNumber: accountNumber.substring(0, 10) + '...', // Log parcial da chave por segurança
         payload: JSON.stringify(gatewayPayload, null, 2)
       })
 
@@ -920,12 +1067,13 @@ export class WalletController {
       })
 
       if (!r.data || r.status >= 300) {
-        console.error('[pixWithdraw]  Erro no gateway:', {
+        console.error('[pixWithdraw] ❌ Erro no gateway:', {
           status: r.status,
           data: r.data,
           payload: JSON.stringify(gatewayPayload, null, 2)
         })
 
+        // Se houver detalhes de validação, incluir na mensagem
         const errorDetails = r.data?.details || r.data?.message || 'Erro desconhecido do gateway'
         throw new HttpError(502, 'GatewayPixWithdrawFailed', {
           provider: r.data,
@@ -936,11 +1084,11 @@ export class WalletController {
 
       const g = r.data || {}
 
-
+      // Extrair orderId e status da resposta do gateway
       const gatewayOrderId = g.providerOrderId || g.orderId || g.id || g.providerOrderNo || finalOrderId
       const gatewayStatus = g.status || 'PENDING'
 
-      console.log('[pixWithdraw]  Saque criado no gateway com sucesso:', {
+      console.log('[pixWithdraw] ✅ Saque criado no gateway com sucesso:', {
         orderId: finalOrderId,
         gatewayOrderId,
         gatewayStatus,
@@ -951,6 +1099,7 @@ export class WalletController {
         note: 'O débito será processado quando o webhook confirmar a transação'
       })
 
+      // Registrar tentativa de webhook para PIX OUT criado (pendente)
       try {
         await WebhookLogModel.insert({
           event_type: 'PIX_WITHDRAW',
@@ -989,6 +1138,7 @@ export class WalletController {
     } catch (err) {
       console.error('[pixWithdraw] Erro ao criar saque Pix:', err);
 
+      // Se for erro do axios com resposta do gateway
       if (err.response && err.response.data) {
         const gatewayError = err.response.data
         console.error('[pixWithdraw] Erro detalhado do gateway:', {
@@ -1023,7 +1173,9 @@ export class WalletController {
     }
   }
 
-
+  /**
+   * Processa reembolso (refund) via API Gateway
+   */
   async pixRefund(req, res, next) {
     try {
       const refundSchema = Joi.object({
@@ -1079,7 +1231,7 @@ export class WalletController {
       })
 
       if (!r.data || r.status >= 300) {
-        console.error('[pixRefund]  Erro no gateway:', {
+        console.error('[pixRefund] ❌ Erro no gateway:', {
           status: r.status,
           data: r.data,
           payload: JSON.stringify(gatewayPayload, null, 2)
@@ -1093,7 +1245,7 @@ export class WalletController {
         })
       }
 
-      console.log('[pixRefund]  Reembolso processado no gateway com sucesso:', {
+      console.log('[pixRefund] ✅ Reembolso processado no gateway com sucesso:', {
         response: r.data
       })
 
@@ -1104,7 +1256,7 @@ export class WalletController {
     } catch (err) {
       console.error('[pixRefund] Erro ao processar reembolso Pix:', err)
 
-  
+      // Se for erro do axios com resposta do gateway
       if (err.response && err.response.data) {
         const gatewayError = err.response.data
         console.error('[pixRefund] Erro detalhado do gateway:', {
@@ -1138,6 +1290,10 @@ export class WalletController {
       })
     }
   }
+
+  /**
+   * Obtém a wallet da tesouraria (HOUSE)
+   */
   async getHouseWallet(currency = 'BRL') {
     console.log('[getHouseWallet] === INÍCIO ===', {
       currency,
@@ -1148,44 +1304,44 @@ export class WalletController {
 
     let houseUserId = null
 
-
+    // Prioridade 1: Buscar usuário com is_treasury = TRUE
     console.log('[getHouseWallet] Buscando usuário de tesouraria via findTreasuryUser...')
     try {
       const treasuryUser = await UserModel.findTreasuryUser()
       if (treasuryUser && treasuryUser.id) {
         houseUserId = treasuryUser.id
-        console.log('[getHouseWallet]  Usuário de tesouraria encontrado via findTreasuryUser (is_treasury=TRUE):', {
+        console.log('[getHouseWallet] ✅ Usuário de tesouraria encontrado via findTreasuryUser (is_treasury=TRUE):', {
           userId: houseUserId,
           name: treasuryUser.name,
           email: treasuryUser.email
         })
       }
     } catch (err) {
-      console.log('[getHouseWallet]  Erro ao buscar via findTreasuryUser (campo is_treasury pode não existir):', err.message)
+      console.log('[getHouseWallet] ⚠️ Erro ao buscar via findTreasuryUser (campo is_treasury pode não existir):', err.message)
     }
 
-    
+    // Prioridade 2: Usar HOUSE_USER_ID do .env
     if (!houseUserId || Number.isNaN(houseUserId)) {
       const raw = env.HOUSE_USER_ID
       houseUserId = raw ? parseInt(raw, 10) : null
       if (houseUserId && !Number.isNaN(houseUserId)) {
-        console.log('[getHouseWallet]  Usuário de tesouraria obtido via env.HOUSE_USER_ID:', houseUserId)
+        console.log('[getHouseWallet] ✅ Usuário de tesouraria obtido via env.HOUSE_USER_ID:', houseUserId)
       } else {
-        console.log('[getHouseWallet]  env.HOUSE_USER_ID não configurado ou inválido:', raw)
+        console.log('[getHouseWallet] ⚠️ env.HOUSE_USER_ID não configurado ou inválido:', raw)
       }
     }
 
     if (!houseUserId || Number.isNaN(houseUserId)) {
-      console.error('[getHouseWallet]  Nenhum usuário de tesouraria encontrado!')
+      console.error('[getHouseWallet] ❌ Nenhum usuário de tesouraria encontrado!')
       throw new HttpError(500, 'HouseUserNotConfigured', {
         message: 'Nenhum usuário de tesouraria encontrado. Configure HOUSE_USER_ID no .env ou defina is_treasury=TRUE no banco.'
       })
     }
 
-
+    // Verificar se o usuário existe
     const user = await UserModel.findById(houseUserId)
     if (!user) {
-      console.error('[getHouseWallet]  Usuário de tesouraria não encontrado no banco:', houseUserId)
+      console.error('[getHouseWallet] ❌ Usuário de tesouraria não encontrado no banco:', houseUserId)
       throw new HttpError(500, 'HouseUserNotFound', {
         message: `Usuário de tesouraria com ID ${houseUserId} não encontrado no banco de dados`
       })
@@ -1199,9 +1355,9 @@ export class WalletController {
 
     const wallet = await WalletModel.getOrCreateHouseWallet(houseUserId, finalCurrency)
 
-
+    // Verificar se a wallet tem type = 'HOUSE'
     if (wallet && wallet.type !== 'HOUSE') {
-      console.error('[getHouseWallet]  Wallet encontrada não é do tipo HOUSE!', {
+      console.error('[getHouseWallet] ❌ Wallet encontrada não é do tipo HOUSE!', {
         walletId: wallet.id,
         walletType: wallet.type,
         expectedType: 'HOUSE'
@@ -1211,7 +1367,7 @@ export class WalletController {
       })
     }
 
-    console.log('[getHouseWallet]  Wallet da tesouraria obtida com sucesso:', {
+    console.log('[getHouseWallet] ✅ Wallet da tesouraria obtida com sucesso:', {
       walletId: wallet?.id,
       userId: wallet?.user_id,
       walletType: wallet?.type,
@@ -1237,7 +1393,7 @@ export class WalletController {
     })
 
     try {
-   
+      // Buscar taxas do usuário
       console.log('[calculatePixInFee] Buscando taxas para userId:', userId)
       const fees = await UserFeeModel.getByUserId(userId)
       console.log('[calculatePixInFee] Taxas encontradas:', fees ? {
@@ -1249,6 +1405,7 @@ export class WalletController {
       let feeAmount = 0
 
       if (fees) {
+        // Calcular taxa fixa + percentual
         feeAmount = UserFeeModel.calculatePixInFee(originalAmount, fees)
         console.log('[calculatePixInFee] Taxa calculada (fixa + percentual):', {
           feeAmount,
@@ -1257,10 +1414,12 @@ export class WalletController {
           pix_in_percent: fees.pix_in_percent
         })
       } else {
-        console.log('[calculatePixInFee]  Nenhuma taxa configurada para o usuário')
+        console.log('[calculatePixInFee] ⚠️ Nenhuma taxa configurada para o usuário')
       }
 
+      // Para depósito: valor líquido = original - taxa
       const netAmount = originalAmount - feeAmount
+      // totalAmount = originalAmount (valor depositado)
       const totalAmount = originalAmount
 
       console.log('[calculatePixInFee] Valores calculados:', {
@@ -1273,13 +1432,13 @@ export class WalletController {
       console.log('[calculatePixInFee] === SUCESSO ===')
       return { netAmount, feeAmount, totalAmount }
     } catch (err) {
-      console.error('[calculatePixInFee] ERRO GERAL:', {
+      console.error('[calculatePixInFee] ❌ ERRO GERAL:', {
         error: err.message,
         stack: err.stack,
         userId,
         originalAmount
       })
-  
+      // Em caso de erro, retornar o valor original sem taxa
       return { netAmount: originalAmount, feeAmount: 0, totalAmount: originalAmount }
     }
   }
@@ -1298,6 +1457,7 @@ export class WalletController {
     })
 
     try {
+      // Buscar taxas do usuário
       console.log('[calculatePixOutFee] Buscando taxas para userId:', userId)
       const fees = await UserFeeModel.getByUserId(userId)
       console.log('[calculatePixOutFee] Taxas encontradas:', fees ? {
@@ -1309,6 +1469,7 @@ export class WalletController {
       let feeAmount = 0
 
       if (fees) {
+        // Calcular taxa fixa + percentual
         feeAmount = UserFeeModel.calculatePixOutFee(originalAmount, fees)
         console.log('[calculatePixOutFee] Taxa calculada (fixa + percentual):', {
           feeAmount,
@@ -1317,10 +1478,12 @@ export class WalletController {
           pix_out_percent: fees.pix_out_percent
         })
       } else {
-        console.log('[calculatePixOutFee]  Nenhuma taxa configurada para o usuário')
+        console.log('[calculatePixOutFee] ⚠️ Nenhuma taxa configurada para o usuário')
       }
+
+      // Para saque: valor total debitado = original + taxa
       const totalAmount = originalAmount + feeAmount
-    
+      // netAmount = originalAmount (valor que será enviado)
       const netAmount = originalAmount
 
       console.log('[calculatePixOutFee] Valores calculados:', {
@@ -1333,14 +1496,22 @@ export class WalletController {
       console.log('[calculatePixOutFee] === SUCESSO ===')
       return { totalAmount, feeAmount, netAmount }
     } catch (err) {
-      console.error('[calculatePixOutFee]  ERRO GERAL:', {
+      console.error('[calculatePixOutFee] ❌ ERRO GERAL:', {
         error: err.message,
         stack: err.stack,
         userId,
         originalAmount
       })
+      // Em caso de erro, retornar o valor original sem taxa
       return { totalAmount: originalAmount, feeAmount: 0, netAmount: originalAmount }
     }
+  }
+  async credit(req, res, next) {
+    return this.mutateCredit(req, res, next)
+  }
+
+  async debit(req, res, next) {
+    return this.mutateDebit(req, res, next)
   }
 }
 

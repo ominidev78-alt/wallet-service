@@ -1,5 +1,6 @@
 import Joi from 'joi'
 import { pool } from '../config/db.js'
+import { WalletModel } from '../models/WalletModel.js'
 import { HttpError } from '../core/HttpError.js'
 
 const adjustSchema = Joi.object({

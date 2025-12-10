@@ -3,10 +3,13 @@ import axios from 'axios'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 import { walletController } from '../controllers/WalletController.js'
+import { UserModel } from '../models/UserModel.js'
 import { WalletModel } from '../models/WalletModel.js'
 import { LedgerModel } from '../models/LedgerModel.js'
+import { UserFeeModel } from '../models/UserFeeModel.js'
 import { WebhookLogModel } from '../models/WebhookLogModel.js'
 import { env } from '../config/env.js'
+import { userAuth } from '../middlewares/userAuth.js'
 
 const router = Router()
 
@@ -31,9 +34,46 @@ const JWT_OPERATOR_SECRET = env.JWT_OPERATOR_SECRET || 'mutual-secret-2025'
 
 /**
  * @openapi
- * /api/users/{id}/wallet:
+ * /api/wallet:
  *   get:
  *     summary: Consulta saldo da carteira BRL do usuário
+ *     tags: [Wallets]
+ *     parameters:
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: App ID do cliente
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Client ID do cliente
+ *     responses:
+ *       200:
+ *         description: Saldo atual do usuário.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/WalletBalanceResponse'
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+router.get('/wallet', (req, res, next) =>
+  walletController.getBalance(req, res, next)
+)
+
+/**
+ * @openapi
+ * /api/users/{id}/wallet:
+ *   get:
+ *     summary: Consulta saldo da carteira BRL do usuário (rota alternativa com userId na URL)
  *     tags: [Wallets]
  *     parameters:
  *       - in: path
@@ -126,9 +166,46 @@ router.post('/users/:id/wallet/debit', (req, res, next) =>
 
 /**
  * @openapi
- * /api/users/{id}/wallet/ledger:
+ * /api/wallet/ledger:
  *   get:
  *     summary: Retorna o extrato (ledger) da carteira do usuário
+ *     tags: [Wallets]
+ *     parameters:
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: App ID do cliente
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Client ID do cliente
+ *     responses:
+ *       200:
+ *         description: Extrato completo da carteira.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/WalletLedgerResponse'
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+router.get('/wallet/ledger', (req, res, next) =>
+  walletController.ledger(req, res, next)
+)
+
+/**
+ * @openapi
+ * /api/users/{id}/wallet/ledger:
+ *   get:
+ *     summary: Retorna o extrato (ledger) da carteira do usuário (rota alternativa com userId na URL)
  *     tags: [Wallets]
  *     parameters:
  *       - in: path
@@ -186,10 +263,10 @@ router.get('/users/:id/wallet/ledger', (req, res, next) =>
  *                 type: number
  *                 description: Valor do depósito em BRL.
  *                 example: 100.0
- *               userId:
- *                 type: integer
- *                 description: ID do usuário no sistema.
- *                 example: 3
+ *               externalId:
+ *                 type: string
+ *                 description: Identificador externo único da transação.
+ *                 example: "deposito-12345"
  *               payerName:
  *                 type: string
  *                 description: Nome do pagador.
@@ -198,6 +275,7 @@ router.get('/users/:id/wallet/ledger', (req, res, next) =>
  *                 description: CPF do pagador (apenas números).
  *             required:
  *               - amount
+ *               - externalId
  *     responses:
  *       200:
  *         description: Cobrança Pix criada com sucesso.
@@ -206,236 +284,7 @@ router.get('/users/:id/wallet/ledger', (req, res, next) =>
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */
-router.post('/wallet/deposit/pix', async (req, res, next) => walletController.pixDeposit(req, res, next) /*{
-  try {
-    const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
-    const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
-
-    if (!appId) {
-      return res.status(400).json({
-        ok: false,
-        error: 'MissingAppId',
-        message: 'app_id é obrigatório nos headers.'
-      })
-    }
-
-    if (!clientId) {
-      return res.status(400).json({
-        ok: false,
-        error: 'MissingClientId',
-        message: 'client_id é obrigatório nos headers.'
-      })
-    }
-
-    const { amount, userId, payerName, payerCPF } = req.body || {}
-
-    if (!amount || Number(amount) <= 0) {
-      return res.status(400).json({
-        ok: false,
-        error: 'InvalidAmount',
-        message: 'O valor do depósito (amount) deve ser maior que zero.'
-      })
-    }
-
-    if (!JWT_OPERATOR_SECRET) {
-      return res.status(500).json({
-        ok: false,
-        error: 'MissingOperatorSecret',
-        message:
-          'JWT_OPERATOR_SECRET não configurado no ambiente deste serviço.'
-      })
-    }
-
-    const rawUserId =
-      userId ??
-      req.query.userId ??
-      req.query.user_id
-
-    if (!rawUserId) {
-      return res.status(400).json({
-        ok: false,
-        error: 'MissingUserId',
-        message: 'userId é obrigatório (body ou query ?userId=).'
-      })
-    }
-
-    const finalUserId = Number(rawUserId)
-
-    if (!Number.isFinite(finalUserId) || finalUserId <= 0) {
-      return res.status(400).json({
-        ok: false,
-        error: 'InvalidUserId',
-        message: 'userId deve ser um número positivo.'
-      })
-    }
-
-    const merOrderNo = `user-${finalUserId}-${Date.now()}`
-
-    const operatorToken = jwt.sign(
-      {
-        type: 'OPERATOR',
-        sub: GATEWAY_OPERATOR_ID
-      },
-      JWT_OPERATOR_SECRET,
-      { expiresIn: '5m' }
-    )
-
-    const payload = {
-      userId: finalUserId,
-      amount: Number(amount),
-      currency: 'BRL',
-      payMethod: 'PIX',
-      merOrderNo,
-      extra: {
-        payerCPF: payerCPF || null,
-        payerName: payerName || null
-      }
-    }
-
-    console.log(
-      '[PIX DEPOSIT USER-SERVICE] Enviando para GATEWAY_DEPOSIT_URL:',
-      GATEWAY_DEPOSIT_URL,
-      'payload:',
-      JSON.stringify(payload)
-    )
-
-    const gatewayResponse = await axios.post(GATEWAY_DEPOSIT_URL, payload, {
-      headers: {
-        Authorization: `Bearer ${operatorToken}`,
-        'Content-Type': 'application/json'
-      }
-    })
-
-    const d = gatewayResponse.data || {}
-
-    const user = await UserModel.findById(finalUserId)
-    
-    const clientIp = 
-      req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-      req.headers['x-real-ip'] ||
-      req.connection?.remoteAddress ||
-      req.socket?.remoteAddress ||
-      '2121.123123.1123'
-
-    const paymentId = crypto.randomUUID()
-    const companyId = crypto.randomUUID()
-    const customerId = crypto.randomUUID()
-    const recipientId = crypto.randomUUID()
-
-  
-    const now = new Date()
-    const createdAt = now.toISOString().replace('Z', '-03:00')
-    const expirationDate = new Date(now.getTime() + 20 * 60 * 1000) 
-    const expirationDateFormatted = expirationDate.toISOString().replace('Z', '-03:00')
-
-    const qrCodeUrl = 
-      d.params?.qrcode ||
-      d.params?.qrCode ||
-      d.params?.emv ||
-      d.params?.brCode ||
-      d.qrCodeText ||
-      'https://digital.mundipagg.com/pix/'
-
-    const finalAmount = d.amount !== undefined ? d.amount : Number(amount)
-    const spreadPercentage = 3
-    const fixedAmount = 3
-    const estimatedFee = Math.round((finalAmount * spreadPercentage / 100) + fixedAmount)
-    const netAmount = finalAmount - estimatedFee
-
-    return res.status(200).json({
-      id: paymentId,
-      amount: finalAmount,
-      refundedAmount: 0,
-      companyId: companyId,
-      installments: 1,
-      paymentMethod: 'PIX',
-      status: 'waiting_payment',
-      postbackUrl: null,
-      metadata: '{}',
-      traceable: false,
-      createdAt: createdAt,
-      updatedAt: createdAt,
-      paidAt: null,
-      ip: clientIp,
-      externalRef: d.orderNo || d.externalRef || `ch_GnOkRWjS0cN06P29`,
-      customer: {
-        id: customerId,
-        name: payerName || user?.name || 'teste',
-        email: user?.email || 'teste@gmail.com',
-        phone: '11991301322',
-        birthdate: null,
-        createdAt: now.toISOString().split('.')[0],
-        document: {
-          number: payerCPF || user?.document || '59801246081',
-          type: 'CPF'
-        },
-        address: {
-          street: 'Rua São Jorge',
-          streetNumber: '165',
-          complement: 'casa',
-          zipCode: '65076632',
-          neighborhood: 'Ilhinha',
-          city: 'São Luís',
-          state: 'MA',
-          country: 'BR'
-        }
-      },
-      card: null,
-      boleto: null,
-      pix: {
-        qrcode: qrCodeUrl,
-        expirationDate: expirationDateFormatted,
-        end2EndId: null,
-        receiptUrl: null
-      },
-      shipping: {
-        street: 'Rua São Jorge',
-        streetNumber: '165',
-        complement: 'casa',
-        zipCode: '65076632',
-        neighborhood: 'Ilhinha',
-        city: 'São Luís',
-        state: 'MA',
-        country: 'BR'
-      },
-      refusedReason: null,
-      items: [
-        {
-          title: 'Teste 2',
-          quantity: 1
-        }
-      ],
-      splits: [
-        {
-          recipientId: recipientId,
-          netAmount: netAmount
-        }
-      ],
-      fee: {
-        fixedAmount: fixedAmount,
-        spreadPercentage: spreadPercentage,
-        estimatedFee: estimatedFee,
-        netAmount: netAmount
-      }
-    })
-  } catch (err) {
-    if (err.response) {
-      console.error(
-        '[PIX DEPOSIT USER-SERVICE][GATEWAY ERROR]',
-        err.response.status,
-        err.response.data
-      )
-    } else {
-      console.error('[PIX DEPOSIT USER-SERVICE][ERROR]', err)
-    }
-
-    return res.status(500).json({
-      ok: false,
-      error: 'PixDepositCreateFailed',
-      message: 'Falha ao criar cobrança Pix pelo user-service.'
-    })
-  }
-}*/)
+router.post('/wallet/deposit/pix', async (req, res, next) => walletController.pixDeposit(req, res, next))
 
 /**
  * ------------------------------------------------------
@@ -477,15 +326,11 @@ router.post('/wallet/deposit/pix', async (req, res, next) => walletController.pi
  *           schema:
  *             type: object
  *             required:
- *               - userId
  *               - amount
  *               - key
  *               - keyType
- *               - bankCode
+ *               - externalId
  *             properties:
- *               userId:
- *                 type: integer
- *                 example: 3
  *               amount:
  *                 type: number
  *                 example: 30.0
@@ -517,6 +362,10 @@ router.post('/wallet/deposit/pix', async (req, res, next) => walletController.pi
  *                 example:
  *                   payerName: "joao da silvaa"
  *                   payerCPF: "44775859806"
+ *               externalId:
+ *                 type: string
+ *                 description: Identificador externo único da transação.
+ *                 example: "saque-12345"
  *               orderId:
  *                 type: string
  *                 description: Identificador único do saque. Se não enviado, será gerado automaticamente.
@@ -594,259 +443,49 @@ router.post('/wallet/refund', async (req, res, next) => walletController.pixRefu
  *            ROTA DE WEBHOOK
  * ------------------------------------------------------
  */
-router.post('/wallet/withdraw/pix', async (req, res, next) => walletController.pixWithdraw(req, res, next) /* {
-  try {
-    const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
-    const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
-
-    if (!appId) {
-      return res.status(400).json({ ok: false, error: 'MissingAppId', message: 'app_id é obrigatório nos headers.' })
-    }
-
-    if (!clientId) {
-      return res.status(400).json({ ok: false, error: 'MissingClientId', message: 'client_id é obrigatório nos headers.' })
-    }
-
-    const {
-      userId,
-      user_id,
-      amount,
-      key,
-      keyType,
-      bankCode,
-      holder,
-      extra,
-      orderId,
-      code,
-      recoveryCode
-    } = req.body || {}
-
-    const finalUserId = Number(userId ?? user_id)
-
-    if (!finalUserId || !Number.isFinite(finalUserId) || finalUserId <= 0) {
-      return res.status(400).json({ ok: false, error: 'InvalidUserId', message: 'userId deve ser um número positivo.' })
-    }
-
-    if (!amount || Number(amount) <= 0) {
-      return res.status(400).json({ ok: false, error: 'InvalidAmount', message: 'amount deve ser maior que zero.' })
-    }
-
-    if (!key || !keyType || !bankCode) {
-      return res.status(400).json({
-        ok: false,
-        error: 'MissingPixData',
-        message: 'key, keyType e bankCode são obrigatórios.'
-      })
-    }
-
-    // Check if 2FA is enabled and verify code
-    const twoFactorConfig = await TwoFactorAuthModel.findByUserId(finalUserId)
-    const twoFactorEnabled = twoFactorConfig?.enabled || false
-
-    if (twoFactorEnabled) {
-      // 2FA is required for OUT transactions
-      if (!code && !recoveryCode) {
-        return res.status(200).json({
-          ok: false,
-          requires2FA: true,
-          message: 'Código 2FA é obrigatório para realizar saques'
-        })
-      }
-
-      // Check if locked
-      const isLocked = await TwoFactorAuthModel.isLocked(finalUserId)
-      if (isLocked) {
-        return res.status(423).json({
-          ok: false,
-          error: 'TwoFactorLocked',
-          message: '2FA está temporariamente bloqueado devido a múltiplas tentativas falhas'
-        })
-      }
-
-      let isValid = false
-
-      if (recoveryCode) {
-        isValid = await TwoFactorAuthModel.verifyRecoveryCode(finalUserId, recoveryCode)
-      } else if (code) {
-        isValid = TotpService.verifyToken(code, twoFactorConfig.secret)
-      }
-
-      if (!isValid) {
-        const failure = await TwoFactorAuthModel.recordFailure(finalUserId)
-        
-        const ipAddress = req.ip || req.headers['x-forwarded-for'] || null
-        const userAgent = req.headers['user-agent'] || null
-
-        await TwoFactorAuthModel.addAuditLog({
-          userId: finalUserId,
-          action: 'PIX_WITHDRAW_2FA_FAILED',
-          method: 'TOTP',
-          context: JSON.stringify({ amount: Number(amount), keyType }),
-          ipAddress,
-          userAgent,
-          success: false,
-          failureReason: 'Invalid code'
-        })
-
-        if (failure.locked) {
-          return res.status(423).json({
-            ok: false,
-            error: 'TwoFactorLocked',
-            message: 'Muitas tentativas falhas. 2FA bloqueado temporariamente.'
-          })
-        }
-
-        return res.status(400).json({
-          ok: false,
-          error: 'InvalidCode',
-          message: 'Código 2FA inválido',
-          attemptsRemaining: 3 - failure.attempts
-        })
-      }
-
-      // Record successful 2FA verification
-      await TwoFactorAuthModel.recordSuccess(finalUserId)
-
-      const ipAddress = req.ip || req.headers['x-forwarded-for'] || null
-      const userAgent = req.headers['user-agent'] || null
-
-      await TwoFactorAuthModel.addAuditLog({
-        userId: finalUserId,
-        action: 'PIX_WITHDRAW_2FA_SUCCESS',
-        method: 'TOTP',
-        context: JSON.stringify({ amount: Number(amount), keyType }),
-        ipAddress,
-        userAgent,
-        success: true
-      })
-    }
-
-    if (!JWT_OPERATOR_SECRET) {
-      return res.status(500).json({
-        ok: false,
-        error: 'MissingOperatorSecret',
-        message: 'JWT_OPERATOR_SECRET não configurado.'
-      })
-    }
-
-    const typeMap = {
-      cpf: 'CPF',
-      CPF: 'CPF',
-      cnpj: 'CNPJ',
-      CNPJ: 'CNPJ',
-      email: 'EMAIL',
-      EMAIL: 'EMAIL',
-      mobile: 'PHONE',
-      MOBILE: 'PHONE',
-      phone: 'PHONE',
-      PHONE: 'PHONE',
-      evp: 'EVP',
-      EVP: 'EVP'
-    }
-
-    console.log('[PIX WITHDRAW USER-SERVICE] === INÍCIO ===', {
-      userId: finalUserId,
-      amount: Number(amount),
-      keyType,
-      mappedType: typeMap[keyType] || 'EVP',
-      timestamp: new Date().toISOString()
-    })
-
-    const mappedType = typeMap[keyType] || 'EVP'
-
-    const payerName =
-      (extra?.payerName && String(extra.payerName).trim()) ||
-      (holder?.name && String(holder.name).trim()) ||
-      'Cliente Mutual'
-
-    const payerCPF =
-      (extra?.payerCPF && String(extra.payerCPF).replace(/\D/g, '')) ||
-      (holder?.document && String(holder.document).replace(/\D/g, '')) ||
-      '00000000000'
-
-    const operatorToken = jwt.sign(
-      { type: 'OPERATOR', sub: GATEWAY_OPERATOR_ID },
-      JWT_OPERATOR_SECRET,
-      { expiresIn: '5m' }
-    )
-
-    const finalOrderId = orderId || `withdraw-${finalUserId}-${Date.now()}`
-
-    const gatewayPayload = {
-      operatorId: GATEWAY_OPERATOR_ID,
-      userId: finalUserId,
-      orderId: finalOrderId,
-      amount: Number(amount),
-      currency: 'BRL',
-      bankCode: String(bankCode),
-      accountNumber: key,
-      accountType: mappedType,
-      accountHolder: {
-        name: payerName,
-        document: payerCPF
-      },
-      payMethod: 'PIX',
-      extra: {
-        ...(extra || {}),
-        userId: finalUserId
-      }
-    }
-
-    console.log('[PIX WITHDRAW USER-SERVICE] → Gateway URL:', GATEWAY_WITHDRAW_URL)
-    console.log('[PIX WITHDRAW USER-SERVICE] → Gateway payload:', JSON.stringify(gatewayPayload, null, 2))
-
-    try {
-      const r = await axios.post(GATEWAY_WITHDRAW_URL, gatewayPayload, {
-        headers: {
-          Authorization: `Bearer ${operatorToken}`,
-          'Content-Type': 'application/json'
-        }
-      })
-
-      console.log('[PIX WITHDRAW USER-SERVICE] ✅ Resposta do gateway:', {
-        status: r.status,
-        data: r.data,
-        orderId: finalOrderId
-      })
-
-      return res.status(200).json(r.data)
-    } catch (gatewayError) {
-      console.error('[PIX WITHDRAW USER-SERVICE] ❌ Erro ao chamar gateway:', {
-        message: gatewayError.message,
-        response: gatewayError.response?.data,
-        status: gatewayError.response?.status
-      })
-      throw gatewayError
-    }
-  } catch (err) {
-    if (err.response) {
-      console.error('[PIX WITHDRAW USER-SERVICE][GATEWAY ERROR]', err.response.status, err.response.data)
-    } else {
-      console.error('[PIX WITHDRAW USER-SERVICE][ERROR]', err)
-    }
-
-    return res.status(500).json({
-      ok: false,
-      error: 'PixWithdrawFailed',
-      message: 'Falha ao processar saque Pix pelo user-service.'
-    })
-  }
-}*/)
+router.post('/wallet/withdraw/pix', async (req, res, next) => walletController.pixWithdraw(req, res, next))
 
 /**
  * Função auxiliar para enviar webhook ao usuário
  * Usa webhook_url_pix_in ou webhook_url_pix_out se disponível, caso contrário usa webhook_url
  */
-async function sendWebhookToUser(user, transactionType, payload) {
+function buildStandardWebhookPayload(transactionType, data) {
+  const basePayload = {
+    merOrderNo: data.merOrderNo || null,
+    orderNo: data.orderNo || null,
+    tradeNo: data.tradeNo || null,
+    status: data.status || (transactionType === 'DEPOSIT' ? 'waiting_payment' : 'pending'),
+    amount: data.amount || data.totalAmount || 0,
+    userId: data.userId || null,
+    type: transactionType === 'DEPOSIT' || transactionType === 'PIX_IN' ? 'DEPOSIT' : 'WITHDRAW',
+    timestamp: new Date().toISOString()
+  }
+
+  if (transactionType === 'DEPOSIT' || transactionType === 'PIX_IN') {
+    basePayload.netAmount = data.netAmount || null
+    basePayload.feeAmount = data.feeAmount || null
+    basePayload.totalAmount = data.totalAmount || data.amount || null
+  } else {
+    basePayload.netAmount = data.netAmount || null
+    basePayload.feeAmount = data.feeAmount || null
+    basePayload.totalAmount = data.totalAmount || null
+  }
+
+  if (data.externalId) {
+    basePayload.externalId = data.externalId
+  }
+
+  return basePayload
+}
+
+async function sendWebhookToUser(user, transactionType, data) {
   let targetUrl = null
   
-  // Determinar URL baseada no tipo de transação
   if (transactionType === 'DEPOSIT' || transactionType === 'PIX_IN') {
     targetUrl = user.webhook_url_pix_in || user.webhook_url || null
   } else if (transactionType === 'WITHDRAW' || transactionType === 'PIX_OUT') {
     targetUrl = user.webhook_url_pix_out || user.webhook_url || null
   } else {
-    // Fallback para webhook_url genérico
     targetUrl = user.webhook_url || null
   }
 
@@ -855,17 +494,18 @@ async function sendWebhookToUser(user, transactionType, payload) {
     return null
   }
 
+  const payload = buildStandardWebhookPayload(transactionType, data)
+
   const start = Date.now()
   try {
     const response = await axios.post(targetUrl, payload, {
       headers: { 'Content-Type': 'application/json' },
-      timeout: 10000 // 10 segundos de timeout
+      timeout: 10000
     })
     const latency = Date.now() - start
 
-    // Registrar no log
-    await WebhookLogModel.insert({
-      event_type: transactionType === 'DEPOSIT' ? 'PIX_DEPOSIT_WEBHOOK' : 'PIX_WITHDRAW_WEBHOOK',
+    WebhookLogModel.insert({
+      event_type: transactionType === 'DEPOSIT' || transactionType === 'PIX_IN' ? 'PIX_DEPOSIT_WEBHOOK' : 'PIX_WITHDRAW_WEBHOOK',
       transaction_id: payload.orderNo || payload.tradeNo || payload.merOrderNo || null,
       target_url: targetUrl,
       http_status: response.status,
@@ -874,7 +514,7 @@ async function sendWebhookToUser(user, transactionType, payload) {
       payload: payload,
       response_body: JSON.stringify(response.data || null),
       error: null
-    })
+    }).catch(err => console.error('[sendWebhookToUser] Erro ao registrar log:', err.message))
 
     console.log('[sendWebhookToUser] ✅ Webhook enviado com sucesso:', {
       userId: user.id,
@@ -890,9 +530,8 @@ async function sendWebhookToUser(user, transactionType, payload) {
     const status = error.response?.status || null
     const responseBody = error.response?.data ? JSON.stringify(error.response.data) : null
 
-    // Registrar no log
-    await WebhookLogModel.insert({
-      event_type: transactionType === 'DEPOSIT' ? 'PIX_DEPOSIT_WEBHOOK' : 'PIX_WITHDRAW_WEBHOOK',
+    WebhookLogModel.insert({
+      event_type: transactionType === 'DEPOSIT' || transactionType === 'PIX_IN' ? 'PIX_DEPOSIT_WEBHOOK' : 'PIX_WITHDRAW_WEBHOOK',
       transaction_id: payload.orderNo || payload.tradeNo || payload.merOrderNo || null,
       target_url: targetUrl,
       http_status: status,
@@ -901,7 +540,7 @@ async function sendWebhookToUser(user, transactionType, payload) {
       payload: payload,
       response_body: responseBody,
       error: error.message || 'Request failed'
-    })
+    }).catch(err => console.error('[sendWebhookToUser] Erro ao registrar log:', err.message))
 
     console.error('[sendWebhookToUser] ❌ Erro ao enviar webhook:', {
       userId: user.id,
@@ -914,6 +553,8 @@ async function sendWebhookToUser(user, transactionType, payload) {
     return { success: false, status, error: error.message }
   }
 }
+
+export { sendWebhookToUser, buildStandardWebhookPayload }
 
 /**
  * @openapi
@@ -1211,8 +852,9 @@ router.post('/wallet/webhook', async (req, res, next) => {
           tradeNo
         })
 
-        // Enviar webhook ao usuário
-        const webhookPayload = {
+        const externalId = req.body.external_id || req.body.externalId || `mutual_${merOrderNo || orderNo || tradeNo || Date.now()}-${crypto.randomUUID()}`
+        
+        const webhookData = {
           merOrderNo,
           orderNo,
           tradeNo,
@@ -1220,10 +862,14 @@ router.post('/wallet/webhook', async (req, res, next) => {
           amount: totalAmount,
           netAmount,
           feeAmount,
+          totalAmount,
           userId: finalUserId,
-          type: 'DEPOSIT'
+          externalId
         }
-        await sendWebhookToUser(user, 'DEPOSIT', webhookPayload)
+        
+        sendWebhookToUser(user, 'DEPOSIT', webhookData).catch(err => {
+          console.error('[WEBHOOK] Erro ao enviar webhook (não bloqueante):', err.message)
+        })
       } else {
         console.log('[WEBHOOK] ⚠️ Valor do depósito inválido ou zero:', originalAmount)
       }
@@ -1469,8 +1115,7 @@ router.post('/wallet/webhook', async (req, res, next) => {
           transacoesCriadas: feeAmount > 0 ? '3 (valor líquido + taxa usuário + taxa tesouraria)' : '1 (apenas valor líquido)'
         })
 
-        // Enviar webhook ao usuário
-        const webhookPayload = {
+        const webhookData = {
           merOrderNo,
           orderNo,
           tradeNo,
@@ -1480,9 +1125,12 @@ router.post('/wallet/webhook', async (req, res, next) => {
           feeAmount,
           totalAmount,
           userId: finalUserId,
-          type: 'WITHDRAW'
+          externalId: withdrawExternalId
         }
-        await sendWebhookToUser(user, 'WITHDRAW', webhookPayload)
+        
+        sendWebhookToUser(user, 'WITHDRAW', webhookData).catch(err => {
+          console.error('[WEBHOOK] Erro ao enviar webhook (não bloqueante):', err.message)
+        })
       } else {
         console.log('[WEBHOOK] ⚠️ Valor do saque inválido ou zero:', withdrawAmount)
       }
@@ -1661,6 +1309,23 @@ router.post('/wallet/webhook/starpago', async (req, res) => {
         }
 
         console.log('[WEBHOOK STARPAGO] ✅ Depósito processado com sucesso')
+        
+        const depositWebhookData = {
+          merOrderNo,
+          orderNo,
+          tradeNo,
+          status,
+          amount: totalAmount,
+          netAmount,
+          feeAmount,
+          totalAmount,
+          userId,
+          externalId: starpagoDepositExternalId
+        }
+        
+        sendWebhookToUser(user, 'DEPOSIT', depositWebhookData).catch(err => {
+          console.error('[WEBHOOK STARPAGO] Erro ao enviar webhook (não bloqueante):', err.message)
+        })
       } else if (isWithdraw) {
         console.log('[WEBHOOK STARPAGO] === PROCESSANDO WITHDRAW ===', {
           userId,
@@ -1784,6 +1449,23 @@ router.post('/wallet/webhook/starpago', async (req, res) => {
         }
 
         console.log('[WEBHOOK STARPAGO] ✅ Saque processado com sucesso')
+        
+        const withdrawWebhookData = {
+          merOrderNo,
+          orderNo,
+          tradeNo,
+          status,
+          amount,
+          netAmount,
+          feeAmount,
+          totalAmount,
+          userId,
+          externalId: starpagoWithdrawExternalId
+        }
+        
+        sendWebhookToUser(user, 'WITHDRAW', withdrawWebhookData).catch(err => {
+          console.error('[WEBHOOK STARPAGO] Erro ao enviar webhook (não bloqueante):', err.message)
+        })
       }
     } else {
       console.log('[WEBHOOK STARPAGO] Ignorado - status não é SUCCESS/PAID ou amount inválido:', {
@@ -1979,6 +1661,23 @@ router.post('/wallet/webhook/payzu', async (req, res) => {
         }
 
         console.log('[WEBHOOK PAYZU] ✅ Depósito processado com sucesso')
+        
+        const depositWebhookData = {
+          merOrderNo,
+          orderNo: providerOrderNo,
+          tradeNo: endToEndId,
+          status,
+          amount: totalAmount,
+          netAmount,
+          feeAmount,
+          totalAmount,
+          userId,
+          externalId: payzuDepositExternalId
+        }
+        
+        sendWebhookToUser(user, 'DEPOSIT', depositWebhookData).catch(err => {
+          console.error('[WEBHOOK PAYZU] Erro ao enviar webhook (não bloqueante):', err.message)
+        })
       } else if (isWithdraw) {
         console.log('[WEBHOOK PAYZU] === PROCESSANDO WITHDRAW ===', {
           userId,
@@ -2102,6 +1801,23 @@ router.post('/wallet/webhook/payzu', async (req, res) => {
         }
 
         console.log('[WEBHOOK PAYZU] ✅ Saque processado com sucesso')
+        
+        const withdrawWebhookData = {
+          merOrderNo,
+          orderNo: providerOrderNo,
+          tradeNo: endToEndId,
+          status,
+          amount,
+          netAmount,
+          feeAmount,
+          totalAmount,
+          userId,
+          externalId: payzuWithdrawExternalId
+        }
+        
+        sendWebhookToUser(user, 'WITHDRAW', withdrawWebhookData).catch(err => {
+          console.error('[WEBHOOK PAYZU] Erro ao enviar webhook (não bloqueante):', err.message)
+        })
       }
     } else {
       console.log('[WEBHOOK PAYZU] Ignorado - status não é COMPLETED/SUCCESS/PAID ou amount inválido:', {
@@ -2128,6 +1844,19 @@ router.post('/wallet/webhook/payzu', async (req, res) => {
  *   post:
  *     summary: Cria depósito PIX via MWBank Provider
  *     tags: [Wallets]
+ *     parameters:
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: App ID do cliente
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Client ID do cliente
  *     requestBody:
  *       required: true
  *       content:
@@ -2135,8 +1864,6 @@ router.post('/wallet/webhook/payzu', async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
- *               userId:
- *                 type: integer
  *               amount:
  *                 type: number
  *     responses:
@@ -2145,13 +1872,47 @@ router.post('/wallet/webhook/payzu', async (req, res) => {
  */
 router.post('/wallet/deposit/mwbank', async (req, res) => {
   try {
-    const { userId, amount } = req.body
+    const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
+    const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
 
-    if (!userId || Number(userId) <= 0)
-      return res.status(400).json({ ok: false, error: 'InvalidUserId' })
+    if (!appId) {
+      return res.status(400).json({
+        ok: false,
+        error: 'MissingAppId',
+        message: 'O header app_id é obrigatório para autenticação.'
+      })
+    }
+
+    if (!clientId) {
+      return res.status(400).json({
+        ok: false,
+        error: 'MissingClientId',
+        message: 'O header client_id é obrigatório para autenticação.'
+      })
+    }
+
+    const { amount } = req.body
 
     if (!amount || Number(amount) <= 0)
       return res.status(400).json({ ok: false, error: 'InvalidAmount' })
+
+    const user = await UserModel.findByAppId(appId)
+    
+    if (!user) {
+      return res.status(401).json({
+        ok: false,
+        error: 'InvalidAppId',
+        message: 'app_id inválido ou não encontrado.'
+      })
+    }
+
+    if (clientId !== appId && clientId !== user.client_secret) {
+      return res.status(401).json({
+        ok: false,
+        error: 'InvalidClientId',
+        message: 'client_id inválido ou não corresponde às credenciais.'
+      })
+    }
 
     const operatorToken = jwt.sign(
       { type: 'OPERATOR', sub: GATEWAY_OPERATOR_ID },
@@ -2160,7 +1921,7 @@ router.post('/wallet/deposit/mwbank', async (req, res) => {
     )
 
     const payload = {
-      userId,
+      userId: user.id,
       amount
     }
 
@@ -2190,6 +1951,19 @@ router.post('/wallet/deposit/mwbank', async (req, res) => {
  *   post:
  *     summary: Solicita saque PIX via MWBank Provider
  *     tags: [Wallets]
+ *     parameters:
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: App ID do cliente
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Client ID do cliente
  *     requestBody:
  *       required: true
  *       content:
@@ -2197,8 +1971,6 @@ router.post('/wallet/deposit/mwbank', async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
- *               userId:
- *                 type: integer
  *               amount:
  *                 type: number
  *               key:
@@ -2211,16 +1983,50 @@ router.post('/wallet/deposit/mwbank', async (req, res) => {
  */
 router.post('/wallet/withdraw/mwbank', async (req, res) => {
   try {
-    const { userId, amount, key, keyType } = req.body
+    const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
+    const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
 
-    if (!userId || Number(userId) <= 0)
-      return res.status(400).json({ ok: false, error: 'InvalidUserId' })
+    if (!appId) {
+      return res.status(400).json({
+        ok: false,
+        error: 'MissingAppId',
+        message: 'O header app_id é obrigatório para autenticação.'
+      })
+    }
+
+    if (!clientId) {
+      return res.status(400).json({
+        ok: false,
+        error: 'MissingClientId',
+        message: 'O header client_id é obrigatório para autenticação.'
+      })
+    }
+
+    const { amount, key, keyType } = req.body
 
     if (!amount || Number(amount) <= 0)
       return res.status(400).json({ ok: false, error: 'InvalidAmount' })
 
     if (!key)
       return res.status(400).json({ ok: false, error: 'MissingPixKey' })
+
+    const user = await UserModel.findByAppId(appId)
+    
+    if (!user) {
+      return res.status(401).json({
+        ok: false,
+        error: 'InvalidAppId',
+        message: 'app_id inválido ou não encontrado.'
+      })
+    }
+
+    if (clientId !== appId && clientId !== user.client_secret) {
+      return res.status(401).json({
+        ok: false,
+        error: 'InvalidClientId',
+        message: 'client_id inválido ou não corresponde às credenciais.'
+      })
+    }
 
     const operatorToken = jwt.sign(
       { type: 'OPERATOR', sub: GATEWAY_OPERATOR_ID },
@@ -2229,7 +2035,7 @@ router.post('/wallet/withdraw/mwbank', async (req, res) => {
     )
 
     const payload = {
-      userId,
+      userId: user.id,
       amount,
       key,
       keyType: keyType || 'CPF'
