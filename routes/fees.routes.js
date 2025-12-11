@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { userFeeController } from '../controllers/UserFeeController.js'
 import { adminAuth } from '../middlewares/adminAuth.js'
 import { userAuth } from '../middlewares/userAuth.js'
+import { hybridAuth } from '../middlewares/hybridAuth.js'
 
 const router = Router()
 
@@ -96,10 +97,8 @@ router.patch('/admin/users/:id/fees', adminAuth, (req, res, next) =>
  * @openapi
  * /api/me/fees:
  *   get:
- *     summary: Consulta as tarifas Pix da conta logada
+ *     summary: Consulta as tarifas Pix da conta logada (hybrid auth)
  *     tags: [UserFees]
- *     security:
- *       - BearerAuth: []
  *     responses:
  *       200:
  *         description: Tarifas atuais da conta do usuário.
@@ -108,7 +107,7 @@ router.patch('/admin/users/:id/fees', adminAuth, (req, res, next) =>
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */
-router.get('/me/fees', (req, res, next) =>
+router.get('/me/fees', hybridAuth, (req, res, next) =>
   userFeeController.getMyFees(req, res, next)
 )
 
