@@ -1063,7 +1063,8 @@ export class WalletController {
         headers: {
           Authorization: `Bearer ${operatorToken}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 30000 // 30 seconds timeout to prevent Cloudflare 524 errors
       })
 
       if (!r.data || r.status >= 300) {
@@ -1137,6 +1138,20 @@ export class WalletController {
       })
     } catch (err) {
       console.error('[pixWithdraw] Erro ao criar saque Pix:', err);
+
+      // Handle axios timeout errors specifically
+      if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+        console.error('[pixWithdraw] ❌ Timeout ao comunicar com o gateway:', {
+          timeout: '30s',
+          gatewayUrl: `${GATEWAY_BASE_URL}/api/withdraw`
+        })
+        return res.status(504).json({
+          ok: false,
+          error: 'GatewayTimeout',
+          message: 'O gateway de pagamento está demorando para responder. Por favor, tente novamente em alguns instantes.',
+          details: 'Timeout após 30 segundos'
+        })
+      }
 
       // Se for erro do axios com resposta do gateway
       if (err.response && err.response.data) {
