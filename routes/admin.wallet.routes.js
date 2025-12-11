@@ -1,8 +1,8 @@
-import { Router } from 'express'
-import { adminWalletController } from '../controllers/AdminWalletController.js'
-import { adminAuth } from '../middlewares/adminAuth.js'
+import { Router } from 'express';
+import { adminWalletController } from '../controllers/AdminWalletController.js';
+import { adminAuth } from '../middlewares/adminAuth.js';
 
-const router = Router()
+const router = Router();
 
 /**
  * @openapi
@@ -45,7 +45,43 @@ const router = Router()
  */
 router.get('/admin/wallet/:id', adminAuth, (req, res, next) =>
   adminWalletController.getUserWallet(req, res, next)
-)
+);
+
+/**
+ * @openapi
+ * /api/admin/wallet/{id}:
+ *   get:
+ *     summary: Consulta a carteira (wallet) da house
+ *     tags: [AdminWallet]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: ID do usuário
+ *       - in: query
+ *         name: currency
+ *         schema:
+ *           type: string
+ *           example: BRL
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Carteira retornada com sucesso
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+router.get('/admin/wallet/house/:id', adminAuth, (req, res, next) =>
+  adminWalletController.getHouseWallet(req, res, next)
+);
 
 /**
  * @openapi
@@ -90,7 +126,7 @@ router.get('/admin/wallet/:id', adminAuth, (req, res, next) =>
  */
 router.get('/admin/wallet/:id/ledger', adminAuth, (req, res, next) =>
   adminWalletController.getUserLedger(req, res, next)
-)
+);
 
 /**
  * @openapi
@@ -139,6 +175,6 @@ router.get('/admin/wallet/:id/ledger', adminAuth, (req, res, next) =>
  */
 router.patch('/admin/wallet/:id/balance', adminAuth, (req, res, next) =>
   adminWalletController.adjustBalance(req, res, next)
-)
+);
 
-export default router
+export default router;
