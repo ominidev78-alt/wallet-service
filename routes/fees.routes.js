@@ -108,7 +108,7 @@ router.patch('/admin/users/:id/fees', adminAuth, (req, res, next) =>
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */
-router.get('/me/fees', userAuth, (req, res, next) =>
+router.get('/me/fees', (req, res, next) =>
   userFeeController.getMyFees(req, res, next)
 )
 
