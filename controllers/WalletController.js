@@ -12,6 +12,8 @@ import { TwoFactorAuthModel } from '../models/TwoFactorAuthModel.js'
 import { WebhookLogModel } from '../models/WebhookLogModel.js'
 import { TotpService } from '../services/TotpService.js'
 import { env } from '../config/env.js'
+import { pool } from '../config/db.js'
+
 
 const mutateSchema = Joi.object({
   amount: Joi.number().positive().required(),
@@ -193,6 +195,126 @@ export class WalletController {
       next(err)
     }
   }
+
+  //Rotas para consultar status de transações
+  //######## PAULO MECHENDO ############ ##
+  async getDepositStatus(req, res) {
+    try {
+      const orderNo = req.params.orderNo
+      const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
+      const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
+
+      if (!appId || !clientId) {
+        return res.status(400).json({ ok: false, error: 'MissingHeaders', message: 'app_id e client_id são obrigatórios.' })
+      }
+
+      const user = await UserModel.findByAppId(appId)
+      if (!user || (clientId !== appId && clientId !== user.client_secret)) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized' })
+      }
+
+      let wallet = await WalletModel.getUserWallet(user.id, 'BRL')
+      if (!wallet) wallet = await WalletModel.createUserWallet(user.id, 'BRL')
+
+      let rows = []
+      try {
+        const q = await pool.query(
+          "SELECT id, direction, amount, meta, external_id, created_at FROM ledger_entries WHERE wallet_id = $1 AND direction = 'CREDIT' AND (meta->>'merOrderNo' = $2 OR meta->>'orderNo' = $2 OR meta->>'tradeNo' = $2 OR meta->>'e2e' = $2) ORDER BY id DESC LIMIT 1;",
+          [wallet.id, orderNo]
+        )
+        rows = q.rows || []
+      } catch {}
+
+      let entry = rows[0]
+      if (!entry) {
+        try {
+          const operatorToken = jwt.sign({ type: 'OPERATOR', sub: GATEWAY_OPERATOR_ID }, JWT_OPERATOR_SECRET, { expiresIn: '3m' })
+          const resp = await axios.get(`${GATEWAY_BASE_URL}/api/deposit/status/${encodeURIComponent(orderNo)}` , { headers: { Authorization: `Bearer ${operatorToken}` } })
+          return res.json({ ok: true, source: 'gateway', data: resp.data })
+        } catch {}
+      }
+
+      const status = entry ? 'paid' : 'waiting_payment'
+      return res.json({ ok: true, orderNo, status, entry })
+    } catch (err) {
+      console.error('[getDepositStatus] Error:', err)
+      return res.status(500).json({ ok: false, error: 'DepositStatusFailed' })
+    }
+  }
+
+  async getWithdrawStatus(req, res) {
+    try {
+      const orderNo = req.params.orderNo
+      const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
+      const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
+
+      if (!appId || !clientId) {
+        return res.status(400).json({ ok: false, error: 'MissingHeaders', message: 'app_id e client_id são obrigatórios.' })
+      }
+
+      const user = await UserModel.findByAppId(appId)
+      if (!user || (clientId !== appId && clientId !== user.client_secret)) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized' })
+      }
+
+      let wallet = await WalletModel.getUserWallet(user.id, 'BRL')
+      if (!wallet) wallet = await WalletModel.createUserWallet(user.id, 'BRL')
+
+      let rows = []
+      try {
+        const q = await pool.query(
+          "SELECT id, direction, amount, meta, external_id, created_at FROM ledger_entries WHERE wallet_id = $1 AND direction = 'DEBIT' AND (meta->>'merOrderNo' = $2 OR meta->>'orderNo' = $2 OR meta->>'tradeNo' = $2 OR meta->>'e2e' = $2) ORDER BY id DESC LIMIT 1;",
+          [wallet.id, orderNo]
+        )
+        rows = q.rows || []
+      } catch {}
+
+      let entry = rows[0]
+      if (!entry) {
+        try {
+          const operatorToken = jwt.sign({ type: 'OPERATOR', sub: GATEWAY_OPERATOR_ID }, JWT_OPERATOR_SECRET, { expiresIn: '3m' })
+          const resp = await axios.get(`${GATEWAY_BASE_URL}/api/withdraw/status/${encodeURIComponent(orderNo)}` , { headers: { Authorization: `Bearer ${operatorToken}` } })
+          return res.json({ ok: true, source: 'gateway', data: resp.data })
+        } catch {}
+      }
+
+      const status = entry ? 'completed' : 'pending'
+      return res.json({ ok: true, orderNo, status, entry })
+    } catch (err) {
+      console.error('[getWithdrawStatus] Error:', err)
+      return res.status(500).json({ ok: false, error: 'WithdrawStatusFailed' })
+    }
+  }
+
+  async getRefundStatus(req, res) {
+    try {
+      const refundNo = req.params.refundNo
+      const appId = req.headers['app_id'] || req.headers['app-id'] || req.headers['App_id'] || req.headers['App-Id']
+      const clientId = req.headers['client_id'] || req.headers['client-id'] || req.headers['Client_id'] || req.headers['Client-Id']
+
+      if (!appId || !clientId) {
+        return res.status(400).json({ ok: false, error: 'MissingHeaders', message: 'app_id e client_id são obrigatórios.' })
+      }
+
+      const user = await UserModel.findByAppId(appId)
+      if (!user || (clientId !== appId && clientId !== user.client_secret)) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized' })
+      }
+
+      try {
+        const operatorToken = jwt.sign({ type: 'OPERATOR', sub: GATEWAY_OPERATOR_ID }, JWT_OPERATOR_SECRET, { expiresIn: '3m' })
+        const resp = await axios.get(`${GATEWAY_BASE_URL}/api/payzu/refund/status/${encodeURIComponent(refundNo)}` , { headers: { Authorization: `Bearer ${operatorToken}` } })
+        return res.json({ ok: true, source: 'gateway', data: resp.data })
+      } catch (err) {
+        return res.status(404).json({ ok: false, error: 'RefundNotFound' })
+      }
+    } catch (err) {
+      console.error('[getRefundStatus] Error:', err)
+      return res.status(500).json({ ok: false, error: 'RefundStatusFailed' })
+    }
+  }
+  //Rotas para consultar status de transações
+  //######## PAULO MECHENDO ############
 
   async ledger(req, res, next) {
     try {

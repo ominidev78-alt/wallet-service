@@ -437,6 +437,207 @@ router.post('/wallet/deposit/pix', async (req, res, next) => walletController.pi
  *         description: Erro interno ao processar o reembolso via gateway
  */
 router.post('/wallet/refund', async (req, res, next) => walletController.pixRefund(req, res, next))
+/**
+ * Status endpoints
+ */
+/**
+ * @openapi
+ * /api/wallet/deposit/{orderNo}/status:
+ *   get:
+ *     summary: Consulta status de depósito PIX
+ *     tags: [Wallets]
+ *     parameters:
+ *       - in: path
+ *         name: orderNo
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Número do pedido/identificador (orderNo/tradeNo/merOrderNo/e2e)
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Status retornado com sucesso
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         description: Não encontrado
+ */
+router.get('/wallet/deposit/:orderNo/status', (req, res, next) => walletController.getDepositStatus(req, res, next))
+/**
+ * @openapi
+ * /api/wallet/withdraw/{orderNo}/status:
+ *   get:
+ *     summary: Consulta status de saque PIX
+ *     tags: [Wallets]
+ *     parameters:
+ *       - in: path
+ *         name: orderNo
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Número do pedido/identificador (orderNo/tradeNo/merOrderNo/e2e)
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Status retornado com sucesso
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         description: Não encontrado
+ */
+router.get('/wallet/withdraw/:orderNo/status', (req, res, next) => walletController.getWithdrawStatus(req, res, next))
+/**
+ * @openapi
+ * /api/wallet/refund/{refundNo}/status:
+ *   get:
+ *     summary: Consulta status de reembolso (refund)
+ *     tags: [Wallets]
+ *     parameters:
+ *       - in: path
+ *         name: refundNo
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Identificador do reembolso
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Status retornado com sucesso
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         description: Não encontrado
+ */
+router.get('/wallet/refund/:refundNo/status', (req, res, next) => walletController.getRefundStatus(req, res, next))
+
+//----------------STATUS DOS ENDPOINTS----------->>>>>>>
+
+/**
+ * @openapi
+ * /api/wallet/deposit/{orderNo}/status:
+ *   get:
+ *     summary: Consulta status de depósito PIX
+ *     tags: [Wallets]
+ *     parameters:
+ *       - in: path
+ *         name: orderNo
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Número do pedido/identificador (orderNo/tradeNo/merOrderNo/e2e)
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Status retornado com sucesso
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         description: Não encontrado
+ */
+router.get('/wallet/deposit/:orderNo/status', (req, res, next) => walletController.getDepositStatus(req, res, next))
+/**
+ * @openapi
+ * /api/wallet/withdraw/{orderNo}/status:
+ *   get:
+ *     summary: Consulta status de saque PIX
+ *     tags: [Wallets]
+ *     parameters:
+ *       - in: path
+ *         name: orderNo
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Número do pedido/identificador (orderNo/tradeNo/merOrderNo/e2e)
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Status retornado com sucesso
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         description: Não encontrado
+ */
+router.get('/wallet/withdraw/:orderNo/status', (req, res, next) => walletController.getWithdrawStatus(req, res, next))
+/**
+ * @openapi
+ * /api/wallet/refund/{refundNo}/status:
+ *   get:
+ *     summary: Consulta status de reembolso (refund)
+ *     tags: [Wallets]
+ *     parameters:
+ *       - in: path
+ *         name: refundNo
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Identificador do reembolso
+ *       - in: header
+ *         name: app_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: header
+ *         name: client_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Status retornado com sucesso
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         description: Não encontrado
+ */
+router.get('/wallet/refund/:refundNo/status', (req, res, next) => walletController.getRefundStatus(req, res, next))
+
+//---------------------------->>>>>>>
+
 
 /**
  * ------------------------------------------------------
