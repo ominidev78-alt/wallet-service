@@ -3,6 +3,7 @@ import morgan from 'morgan';
 import helmet from 'helmet';
 import hpp from 'hpp';
 import cors from 'cors';
+import compression from 'compression';
 import { v4 as uuid } from 'uuid';
 import routes from './routes/index.js';
 import { notFoundHandler, globalErrorHandler } from './core/errorHandler.js';
@@ -95,7 +96,8 @@ if (env.NODE_ENV !== 'production') {
 app.use(helmet());
 app.use(hpp());
 app.use(express.json({ limit: '2mb', type: ['application/json', 'application/*+json'] }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }))
+app.use(compression());
 
 app.use((req, res, next) => {
   req.id = req.headers['x-request-id'] || uuid();
