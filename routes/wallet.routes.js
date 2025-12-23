@@ -1,7 +1,7 @@
-import { Router } from 'express'
+import express from 'express'
 import { walletController } from '../controllers/WalletController.js'
 
-const router = Router()
+const router = express.Router()
 
 /**
  * @openapi

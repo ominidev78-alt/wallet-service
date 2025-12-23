@@ -1,8 +1,8 @@
-import { Router } from 'express'
+import express from 'express'
 import { internalPaymentsController } from '../controllers/InternalPaymentsController.js'
 import { walletController } from '../controllers/WalletController.js'
 
-const router = Router()
+const router = express.Router()
 
 /**
  * @openapi

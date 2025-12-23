@@ -1,8 +1,8 @@
-import { Router } from 'express'
+import express from 'express'
 import { adminWalletController } from '../controllers/AdminWalletController.js'
 import { adminAuth } from '../middlewares/adminAuth.js'
 
-const router = Router()
+const router = express.Router()
 
 /**
  * @openapi

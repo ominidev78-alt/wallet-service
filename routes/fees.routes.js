@@ -1,10 +1,10 @@
-import { Router } from 'express'
+import express from 'express'
 import { userFeeController } from '../controllers/UserFeeController.js'
 import { adminAuth } from '../middlewares/adminAuth.js'
 import { userAuth } from '../middlewares/userAuth.js'
 import { hybridAuth } from '../middlewares/hybridAuth.js'
 
-const router = Router()
+const router = express.Router()
 
 /**
  * @openapi
