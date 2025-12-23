@@ -143,4 +143,89 @@ export class LedgerModel {
 
     return rows.length > 0
   }
+
+  /**
+   * Busca a transação original no ledger usando merOrderNo ou externalId
+   * @param {number} walletId - ID da wallet
+   * @param {string} merOrderNo - Número do pedido do merchant
+   * @param {string} externalId - External ID da transação
+   * @returns {Promise<object|null>} - Dados da transação original ou null
+   */
+  static async findOriginalTransaction(walletId, merOrderNo, externalId) {
+    const conditions = []
+    const params = [walletId]
+    let paramIndex = 2
+
+    if (merOrderNo) {
+      conditions.push(`meta->>'merOrderNo' = $${paramIndex}`)
+      params.push(merOrderNo)
+      paramIndex++
+    }
+
+    if (externalId) {
+      conditions.push(`external_id = $${paramIndex}`)
+      params.push(externalId)
+      paramIndex++
+    }
+
+    if (conditions.length === 0) {
+      return null
+    }
+
+    const whereClause = conditions.join(' OR ')
+
+    const { rows } = await pool.query(
+      `
+      SELECT 
+        id,
+        external_id,
+        meta,
+        amount,
+        direction,
+        created_at
+      FROM ledger_entries
+      WHERE wallet_id = $1
+        AND (${whereClause})
+        AND direction = 'CREDIT'
+      ORDER BY id ASC
+      LIMIT 1;
+      `,
+      params
+    )
+
+    if (rows.length === 0) {
+      return null
+    }
+
+    const entry = rows[0]
+    const meta = typeof entry.meta === 'string' ? JSON.parse(entry.meta) : entry.meta
+
+    return {
+      externalId: entry.external_id,
+      merOrderNo: meta?.merOrderNo || merOrderNo,
+      orderNo: meta?.orderNo || externalId,
+      tradeNo: meta?.tradeNo || meta?.e2e || merOrderNo,
+      amount: entry.amount,
+      meta
+    }
+  }
+
+  /**
+   * Atualiza os metadados de uma entrada do ledger
+   * @param {number} walletId
+   * @param {string} externalId
+   * @param {object} newMeta
+   * @returns {Promise<boolean>}
+   */
+  static async updateMeta(walletId, externalId, newMeta) {
+    const { rowCount } = await pool.query(
+      `
+      UPDATE ledger_entries
+      SET meta = meta || $3::jsonb
+      WHERE wallet_id = $1 AND external_id = $2;
+      `,
+      [walletId, externalId, JSON.stringify(newMeta)]
+    )
+    return rowCount > 0
+  }
 }

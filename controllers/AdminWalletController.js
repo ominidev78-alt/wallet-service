@@ -1,107 +1,71 @@
-import Joi from 'joi';
-import { pool } from '../config/db.js';
-import { WalletModel } from '../models/WalletModel.js';
-import { UserModel } from '../models/UserModel.js';
-import { HttpError } from '../core/HttpError.js';
+import Joi from 'joi'
+import { pool } from '../config/db.js'
+import { WalletModel } from '../models/WalletModel.js'
+import { HttpError } from '../core/HttpError.js'
 
 const adjustSchema = Joi.object({
   type: Joi.string().valid('CREDIT', 'DEBIT').required(),
   amount: Joi.number().positive().required(),
-  description: Joi.string().allow('', null),
-});
+  description: Joi.string().allow('', null)
+})
 
 class AdminWalletController {
   async #getOrCreateUserWallet(userId, currencyParam) {
     if (!Number.isFinite(userId) || userId <= 0) {
-      throw new HttpError(400, 'InvalidUserId');
+      throw new HttpError(400, 'InvalidUserId')
     }
 
-    const currency = (currencyParam || 'BRL').toUpperCase();
+    const currency = (currencyParam || 'BRL').toUpperCase()
 
-    let wallet = await WalletModel.getUserWallet(userId, currency);
+    let wallet = await WalletModel.getUserWallet(userId, currency)
     if (!wallet) {
-      wallet = await WalletModel.createUserWallet(userId, currency);
+      wallet = await WalletModel.createUserWallet(userId, currency)
     }
 
-    return wallet;
+    return wallet
   }
 
   async getUserWallet(req, res, next) {
     try {
-      const userId = Number(req.params.id);
-      const wallet = await this.#getOrCreateUserWallet(userId, req.query.currency);
+      const userId = Number(req.params.id)
+      const wallet = await this.#getOrCreateUserWallet(userId, req.query.currency)
 
       return res.json({
         ok: true,
-        data: wallet,
-      });
+        data: wallet
+      })
     } catch (err) {
-      next(err);
-    }
-  }
-
-  async getHouseWallet(req, res, next) {
-    try {
-      const finalCurrency = (req.query.currency || 'BRL').toUpperCase();
-      const houseUserId = Number(req.params.id);
-
-      if (!houseUserId || Number.isNaN(houseUserId)) {
-        throw new HttpError(400, 'HouseUserNotConfigured', {
-          message: 'Nenhum usuário de tesouraria encontrado.',
-        });
-      }
-
-      const user = await UserModel.findById(houseUserId);
-      if (!user) {
-        throw new HttpError(500, 'HouseUserNotFound', {
-          message: `Usuário de tesouraria com ID ${houseUserId} não encontrado no banco de dados`,
-        });
-      }
-
-      const wallet = await WalletModel.getOrCreateHouseWallet(houseUserId, finalCurrency);
-
-      if (wallet && wallet.type !== 'HOUSE') {
-        throw new HttpError(500, 'InvalidHouseWalletType', {
-          message: `Wallet encontrada não é do tipo HOUSE. Tipo atual: ${wallet.type}`,
-        });
-      }
-
-      return res.json({
-        ok: true,
-        data: wallet,
-      });
-    } catch (err) {
-      next(err);
+      next(err)
     }
   }
 
   async getUserLedger(req, res, next) {
     try {
-      const userId = Number(req.params.id);
-      const wallet = await this.#getOrCreateUserWallet(userId, req.query.currency);
+      const userId = Number(req.params.id)
+      const wallet = await this.#getOrCreateUserWallet(userId, req.query.currency)
 
-      let limit = Number(req.query.limit || 100);
+      let limit = Number(req.query.limit || 100)
       if (!Number.isFinite(limit) || limit <= 0 || limit > 1000) {
-        limit = 100;
+        limit = 100
       }
 
-      const from = req.query.from || null;
-      const to = req.query.to || null;
+      const from = req.query.from || null
+      const to = req.query.to || null
 
-      const params = [wallet.id];
-      let where = 'wallet_id = $1';
+      const params = [wallet.id]
+      let where = 'wallet_id = $1'
 
       if (from) {
-        params.push(from);
-        where += ` AND created_at >= $${params.length}`;
+        params.push(from)
+        where += ` AND created_at >= $${params.length}`
       }
 
       if (to) {
-        params.push(to);
-        where += ` AND created_at <= $${params.length}`;
+        params.push(to)
+        where += ` AND created_at <= $${params.length}`
       }
 
-      params.push(limit);
+      params.push(limit)
 
       const query = `
         SELECT
@@ -112,73 +76,73 @@ class AdminWalletController {
           description,
           meta,
           created_at
-        FROM wallet_ledger
+        FROM ledger_entries
         WHERE ${where}
         ORDER BY created_at DESC
         LIMIT $${params.length}
-      `;
+      `
 
-      const { rows } = await pool.query(query, params);
+      const { rows } = await pool.query(query, params)
 
       return res.json({
         ok: true,
-        data: rows,
-      });
+        data: rows
+      })
     } catch (err) {
-      next(err);
+      next(err)
     }
   }
 
   async adjustBalance(req, res, next) {
     try {
-      const userId = Number(req.params.id);
+      const userId = Number(req.params.id)
 
       const { value, error } = adjustSchema.validate(req.body, {
-        abortEarly: false,
-      });
+        abortEarly: false
+      })
 
       if (error) {
-        throw new HttpError(400, 'ValidationError', { details: error.details });
+        throw new HttpError(400, 'ValidationError', { details: error.details })
       }
 
-      const wallet = await this.#getOrCreateUserWallet(userId, req.query.currency);
+      const wallet = await this.#getOrCreateUserWallet(userId, req.query.currency)
 
-      const currentBalance = Number(wallet.balance || 0);
-      const amount = Number(value.amount);
+      const currentBalance = Number(wallet.balance || 0)
+      const amount = Number(value.amount)
 
-      let newBalance;
+      let newBalance
 
       if (value.type === 'CREDIT') {
-        newBalance = currentBalance + amount;
+        newBalance = currentBalance + amount
       } else {
         if (currentBalance < amount) {
           throw new HttpError(400, 'InsufficientFunds', {
-            message: 'Saldo insuficiente para débito',
-          });
+            message: 'Saldo insuficiente para débito'
+          })
         }
-        newBalance = currentBalance - amount;
+        newBalance = currentBalance - amount
       }
 
-      const updatedWallet = await WalletModel.updateBalance(wallet.id, newBalance);
+      const updatedWallet = await WalletModel.updateBalance(wallet.id, newBalance)
 
       const description =
         value.description ||
         (value.type === 'CREDIT'
           ? 'Ajuste manual de crédito (admin)'
-          : 'Ajuste manual de débito (admin)');
+          : 'Ajuste manual de débito (admin)')
 
       const meta = {
         adminAdjustment: true,
-        type: value.type,
-      };
+        type: value.type
+      }
 
       const insertLedgerQuery = `
-        INSERT INTO wallet_ledger
-          (wallet_id, direction, amount, description, meta)
+        INSERT INTO ledger_entries
+          (wallet_id, direction, amount, description, meta, external_id)
         VALUES
-          ($1, $2, $3, $4, $5::jsonb)
+          ($1, $2, $3, $4, $5::jsonb, $6)
         RETURNING id, wallet_id, direction AS type, amount, description, meta, created_at
-      `;
+      `
 
       const { rows } = await pool.query(insertLedgerQuery, [
         wallet.id,
@@ -186,21 +150,22 @@ class AdminWalletController {
         amount,
         description,
         JSON.stringify(meta),
-      ]);
+        `ADJUST_${Date.now()}`
+      ])
 
-      const ledgerEntry = rows[0] || null;
+      const ledgerEntry = rows[0] || null
 
       return res.json({
         ok: true,
         data: {
           wallet: updatedWallet,
-          ledgerEntry,
-        },
-      });
+          ledgerEntry
+        }
+      })
     } catch (err) {
-      next(err);
+      next(err)
     }
   }
 }
 
-export const adminWalletController = new AdminWalletController();
+export const adminWalletController = new AdminWalletController()
