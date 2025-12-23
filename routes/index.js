@@ -1,4 +1,8 @@
+import { Router } from 'express'
 import healthRoutes from './health.routes.js'
+import walletRoutes from './wallet.routes.js'
+import adminWalletRoutes from './admin.wallet.routes.js'
+import internalRoutes from './internal.routes.js'
 
 const router = Router()
 
