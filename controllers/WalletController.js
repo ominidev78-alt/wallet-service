@@ -257,7 +257,7 @@ export class WalletController {
       // No microserviço, o user pode vir incompleto se validate-credentials não devolver tudo.
       // Precisamos garantir que devolve as URLs de webhook.
       if (user.webhook_url || user.webhook_url_pix_in) {
-        sendWebhookToUser(user, 'DEPOSIT', { ...d.rawMutual, externalId, amount: Number(amount) }, 0, { useRawPayload: true })
+        sendWebhookToUser(user, 'DEPOSIT', { ...d.rawPagandu, externalId, amount: Number(amount) }, 0, { useRawPayload: true })
       }
 
       return res.json({
