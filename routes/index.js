@@ -1,10 +1,10 @@
-import { Router } from 'express'
+import express from 'express'
 import healthRoutes from './health.routes.js'
 import walletRoutes from './wallet.routes.js'
 import adminWalletRoutes from './admin.wallet.routes.js'
 import internalRoutes from './internal.routes.js'
 
-const router = Router()
+const router = express.Router()
 
 router.use('/', healthRoutes)
 router.use('/api', walletRoutes)
